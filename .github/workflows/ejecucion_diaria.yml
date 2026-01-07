@@ -4,18 +4,20 @@ on:
   workflow_dispatch:
   schedule:
     # LUN-VIE (COL 8:00–20:00) cada 30 min
-    # 8:00–18:59 COL => 13:00–23:59 UTC (mismo día)
     - cron: "*/30 13-23 * * 1-5"
-    # 19:00–20:00 COL => 00:00–01:00 UTC (día siguiente)
     - cron: "*/30 0-1 * * 2-6"
 
     # SÁBADO (COL 9:00–14:00) cada hora
-    # 9:00–14:00 COL => 14:00–19:00 UTC (sábado)
     - cron: "0 14-19 * * 6"
+
+permissions:
+  contents: write
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    env:
+      MI_JSON: ${{ secrets.MI_JSON }}
 
     steps:
       - name: Checkout
@@ -29,14 +31,13 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt || true
+          python -m pip install -r requirements.txt
           python -m pip install nbconvert ipykernel
 
       - name: Run notebook
         run: |
           jupyter nbconvert --to notebook --execute "EJECUCIÓN_DIARIA_TIMELINE_CARTERA.ipynb" --output "EJECUCIÓN_DIARIA_TIMELINE_CARTERA_out.ipynb"
 
-      # Si tu proceso actualiza archivos (ej: un CSV/Excel/lo que sea) y quieres que se guarden en el repo:
       - name: Commit changes
         run: |
           git config user.name "github-actions[bot]"
