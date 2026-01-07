@@ -17,6 +17,10 @@ jobs:
   run:
     runs-on: ubuntu-latest
     env:
+      # ✅ Tu código en GitHub está buscando GOOGLE_SERVICE_ACCOUNT_JSON
+      # (por eso falló aunque tuvieras MI_JSON)
+      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.MI_JSON }}
+      # (Opcional) si en otras partes usas MI_JSON directo:
       MI_JSON: ${{ secrets.MI_JSON }}
 
     steps:
