@@ -1,0 +1,9 @@
+pandas
+numpy
+gspread
+gspread-dataframe
+google-auth
+google-auth-oauthlib
+google-api-python-client
+openpyxl
+rapidfuzz
