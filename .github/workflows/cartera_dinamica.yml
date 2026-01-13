@@ -1,0 +1,44 @@
+name: Cartera Dinamica (8am y 3pm COL)
+
+on:
+  schedule:
+    # 8:00 AM Colombia = 13:00 UTC (Lunes a Viernes)
+    - cron: "0 13 * * 1-5"
+    # 3:00 PM Colombia = 20:00 UTC (Lunes a Viernes)
+    - cron: "0 20 * * 1-5"
+  workflow_dispatch: {}
+
+jobs:
+  run-notebook:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install nbconvert ipykernel
+
+      - name: Execute Cartera_Dinamica.ipynb
+        env:
+          MB_USER: ${{ secrets.MB_USER }}
+          MB_PASS: ${{ secrets.MB_PASS }}
+          MI_JSON: ${{ secrets.MI_JSON }}
+        run: |
+          jupyter nbconvert --to notebook --execute "Cartera_Dinamica.ipynb" --output "Cartera_Dinamica_out.ipynb"
+
+      - name: Commit output notebook (if changed)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "Cartera_Dinamica_out.ipynb"
+          git diff --staged --quiet || git commit -m "Auto update Cartera_Dinamica_out.ipynb"
+          git push
