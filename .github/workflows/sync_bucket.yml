@@ -1,0 +1,31 @@
+name: Sync Bucket (6pm COL)
+
+on:
+  schedule:
+    # 6:00 PM Colombia = 23:00 UTC | Lunes a Viernes
+    - cron: "0 23 * * 1-5"
+  workflow_dispatch: {}
+
+jobs:
+  sync-bucket:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run sync_bucket.py
+        env:
+          MI_JSON: ${{ secrets.MI_JSON }}
+        run: |
+          python sync_bucket.py
