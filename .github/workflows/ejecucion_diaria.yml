@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   schedule:
     # LUN-VIE (COL 8:00–20:00) cada 30 min
-    - cron: "*/30 13-23 * * 1-5"
+    - cron: "*/30 13-22 * * 1-5"
     - cron: "*/30 0-1 * * 2-6"
 
     # SÁBADO (COL 9:00–14:00) cada hora
