@@ -142,9 +142,9 @@ def main():
     tipo = df_today[COL_TIPO_ACT].astype(str).str.upper().str.strip()
     status = df_today[COL_STATUS].astype(str).str.upper().str.strip()
 
-    df_today["_peso"] = 1
-    df_today.loc[tipo.eq("EFECTIVA"), "_peso"] = 2
-    df_today.loc[tipo.eq("EFECTIVA") & status.eq("LIQUIDADO"), "_peso"] = 3
+    df_today["_peso"] = 3
+    df_today.loc[tipo.eq("EFECTIVA"), "_peso"] = 6
+    df_today.loc[tipo.eq("EFECTIVA") & status.eq("LIQUIDADO"), "_peso"] = 9
 
     quotas = (
         df_today.groupby(COL_NEGOCIADOR)["_peso"]
