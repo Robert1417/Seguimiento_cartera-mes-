@@ -25,6 +25,19 @@ COL_NUEVO = "Nuevo"
 
 TZ = "America/Bogota"
 
+# Columnas que quieres mantener sincronizadas (aunque la referencia ya exista en Bucket)
+UPDATE_COLS = [
+    "inserted_at_ultima",
+    "end_ultima",
+    "CATEGORIA_PRED_ultima",
+    "payment_to_bank_ultima",
+    "observations_ultima",
+    "Descuento_Actualizacion",
+    "Tipo de Actividad",
+    "FASE",
+    "STATUS",
+]
+
 
 # =========================================================
 # HELPERS
@@ -136,9 +149,11 @@ def main():
     df_today = df[df["_inserted_dt"].dt.date == today].copy()
     if df_today.empty:
         print("Hoy no hay actividad")
+        # OJO: aun si hoy no hay actividad, igual podrías querer sincronizar columnas.
+        # Si quieres que igual sincronice, comenta este return.
         return
 
-    # ------------------ Cupos ponderados ------------------
+    # ------------------ Cupos ponderados (triple) ------------------
     tipo = df_today[COL_TIPO_ACT].astype(str).str.upper().str.strip()
     status = df_today[COL_STATUS].astype(str).str.upper().str.strip()
 
@@ -157,16 +172,18 @@ def main():
 
     funnel_cols = [c for c in df.columns.tolist() if c != "_inserted_dt"]
     desired_header = ensure_columns(funnel_cols, [COL_NUEVO])
+    desired_header = ensure_columns(desired_header, UPDATE_COLS)  # asegurar columnas a sincronizar
 
     if not values:
         # Hoja nueva
         header = desired_header
         ws_b.update("A1", [header])
         df_bucket = pd.DataFrame(columns=header)
+        current_header = header
     else:
-        # Hoja existente: mantener lo que hay, pero agregar columnas faltantes de Funnel + Nuevo
         current_header = [_norm_col(c) for c in values[0]]
         header = ensure_columns(current_header, desired_header)
+
         # si cambió el header, lo actualizamos
         if header != current_header:
             ws_b.update("A1", [header])
@@ -174,12 +191,65 @@ def main():
         rows = values[1:]
         df_bucket = pd.DataFrame(rows, columns=current_header)
         df_bucket.columns = [_norm_col(c) for c in df_bucket.columns]
-        # Asegurar columna Nuevo en df_bucket para limpieza
-        if COL_NUEVO not in df_bucket.columns:
-            df_bucket[COL_NUEVO] = ""
 
-    # ------------------ limpiar "Nuevo" ------------------
-    if not df_bucket.empty:
+        # Asegurar columnas nuevas en df_bucket
+        for c in header:
+            if c not in df_bucket.columns:
+                df_bucket[c] = ""
+
+    # =========================================================
+    # 1) SINCRONIZAR columnas dinámicas para referencias existentes
+    # =========================================================
+    updates_in_bucket = 0
+
+    if not df_bucket.empty and COL_REF in df_bucket.columns:
+        df_bucket[COL_REF] = df_bucket[COL_REF].astype(str).str.strip()
+        existing_refs = set(df_bucket[COL_REF].tolist())
+
+        # Asegurar que Funnel tenga las UPDATE_COLS (si alguna no existe, se ignora)
+        update_cols_present = [c for c in UPDATE_COLS if c in df.columns]
+
+        if update_cols_present and existing_refs:
+            # Tomar "último estado" por referencia según _inserted_dt
+            df_latest = (
+                df[df[COL_REF].isin(existing_refs)]
+                .sort_values("_inserted_dt")
+                .groupby(COL_REF, as_index=False)
+                .tail(1)
+                [[COL_REF] + update_cols_present]
+                .copy()
+            )
+            latest_map = df_latest.set_index(COL_REF)[update_cols_present].astype(str).to_dict(orient="index")
+
+            # Actualizar filas de Bucket: para cada referencia, setear esas columnas
+            for c in update_cols_present:
+                if c not in df_bucket.columns:
+                    df_bucket[c] = ""
+
+            # Comparación y update
+            for ref in existing_refs:
+                if ref not in latest_map:
+                    continue
+                mask = df_bucket[COL_REF].eq(ref)
+                for c, new_val in latest_map[ref].items():
+                    old_vals = df_bucket.loc[mask, c].astype(str)
+                    # si hay al menos una diferencia, actualizamos TODAS las filas de esa referencia
+                    if (old_vals != str(new_val)).any():
+                        df_bucket.loc[mask, c] = str(new_val)
+                        updates_in_bucket += int(mask.sum())
+
+            # Reescribir Bucket completo (solo si hubo cambios)
+            if updates_in_bucket > 0:
+                # También aprovechamos para asegurar que "Nuevo" quede vacío antes del append
+                if COL_NUEVO in df_bucket.columns:
+                    df_bucket[COL_NUEVO] = ""
+
+                ws_b.update("A2", df_to_rows(df_bucket, header), value_input_option="USER_ENTERED")
+
+    # ------------------ limpiar "Nuevo" (si no reescribimos arriba) ------------------
+    # Si ya reescribimos, "Nuevo" quedó vacío y esto no hace falta.
+    # Pero lo dejamos como "seguro", sin costo grande.
+    if not df_bucket.empty and COL_NUEVO in df_bucket.columns:
         if df_bucket[COL_NUEVO].astype(str).str.strip().ne("").any():
             df_bucket[COL_NUEVO] = ""
             col = header.index(COL_NUEVO) + 1
@@ -197,7 +267,7 @@ def main():
     # ------------------ Referencias candidatas ------------------
     df_cand = df[~df[COL_REF].isin(existing_refs)].copy()
     if df_cand.empty:
-        print("No hay referencias nuevas")
+        print(f"No hay referencias nuevas | Actualizaciones en Bucket: {updates_in_bucket}")
         return
 
     ref_priority = (
@@ -230,7 +300,7 @@ def main():
                 remaining -= len(refs)
 
     if not chosen_refs:
-        print("No se asignó nada hoy")
+        print(f"No se asignó nada hoy | Actualizaciones en Bucket: {updates_in_bucket}")
         return
 
     # ------------------ Insertar (todas las filas de esas referencias) ------------------
@@ -244,6 +314,7 @@ def main():
     ws_b.append_rows(df_to_rows(df_out, header), value_input_option="USER_ENTERED")
 
     print(
+        f"Actualizaciones en Bucket (celdas/fila tocadas aprox): {updates_in_bucket} | "
         f"Referencias asignadas: {len(set(chosen_refs))} | "
         f"Filas insertadas: {len(df_out)}"
     )
