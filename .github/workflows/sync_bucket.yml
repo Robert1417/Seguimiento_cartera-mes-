@@ -2,8 +2,10 @@ name: Sync Bucket (6pm COL)
 
 on:
   schedule:
-    # 6:00 PM Colombia = 23:00 UTC | Lunes a Viernes
-    - cron: "0 23 * * 1-5"
+    - cron: "25 14 * * *"
+    - cron: "25 17 * * *"
+    - cron: "15 20 * * *"
+    - cron: "0 23 * * *"
   workflow_dispatch: {}
 
 jobs:
