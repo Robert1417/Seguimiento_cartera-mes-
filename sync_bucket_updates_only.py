@@ -23,7 +23,7 @@ FUNNEL_TAB_NAME = "Funnel"
 BUCKET_SHEET_ID = "1qw77Q0BRAXfavNHzC53TT3usKDXRMp1pezAVG13qz3k"
 BUCKET_TAB_NAME = "Bucket"
 
-COL_REF = "Referencia"
+COL_REF = "Id deuda"
 COL_INSERTED_AT = "inserted_at_ultima"
 
 # Tus columnas a mantener sincronizadas
