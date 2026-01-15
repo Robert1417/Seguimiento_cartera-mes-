@@ -1,0 +1,38 @@
+name: Update Bucket Columns (cada 1h25m)
+
+on:
+  schedule:
+    # Horarios en UTC (Bogotá = UTC-5)
+    - cron: "45 13 * * *"  # 08:45 Bogota
+    - cron: "35 16 * * *"  # 11:35 Bogota
+    - cron: "25 19 * * *"  # 14:25 Bogota
+    - cron: "50 20 * * *"  # 15:50 Bogota
+    - cron: "15 22 * * *"  # 17:15 Bogota
+    - cron: "40 23 * * *"  # 18:40 Bogota
+
+  # Permite ejecutarlo manualmente si quieres
+  workflow_dispatch: {}
+
+jobs:
+  run-updates-only:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas gspread google-auth
+
+      - name: Run sync (updates only)
+        env:
+          MI_JSON: ${{ secrets.MI_JSON }}
+        run: |
+          python sync_bucket_updates_only.py
