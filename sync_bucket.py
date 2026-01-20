@@ -14,7 +14,7 @@ FUNNEL_TAB_NAME = "Funnel"
 BUCKET_SHEET_ID = "1qw77Q0BRAXfavNHzC53TT3usKDXRMp1pezAVG13qz3k"
 BUCKET_TAB_NAME = "Bucket"
 
-# Columnas clave (POR REFERENCIA)
+# Columnas clave (POR REFERENCIA) EN FUNNEL
 COL_REF = "Referencia"
 COL_BUCKET = "Bucket"
 COL_NEGOCIADOR = "Negociador"
@@ -25,8 +25,8 @@ COL_NUEVO = "Nuevo"
 
 TZ = "America/Bogota"
 
-# Columnas que quieres mantener sincronizadas (aunque la referencia ya exista en Bucket)
-UPDATE_COLS = [
+# Columnas a sincronizar (NOMBRES COMO ESTÁN EN FUNNEL)
+UPDATE_COLS_FUNNEL = [
     "inserted_at_ultima",
     "end_ultima",
     "CATEGORIA_PRED_ultima",
@@ -36,6 +36,56 @@ UPDATE_COLS = [
     "Tipo de Actividad",
     "FASE",
     "STATUS",
+]
+
+# =========================================================
+# PRESENTACIÓN EN BUCKET: renombres + orden deseado
+# (mismos que ya dejaste funcionando en updates_only)
+# =========================================================
+FUNNEL_TO_BUCKET_RENAME = {
+    "BANCOS_ESTANDAR": "Banco",
+    "Descuento": "Descuento Requerido",
+    "inserted_at_ultima": "Fecha Actualizacion",
+    "end_ultima": "Actualizado Por",
+    "CATEGORIA_PRED_ultima": "Categoria Actualizacion",
+    "payment_to_bank_ultima": "Pago a Banco actualizacion",
+    "observations_ultima": "Observación",
+}
+
+PREFERRED_ORDER = [
+    "Referencia",
+    "Id deuda",
+    "Cedula",
+    "Nombre del cliente",
+    "Negociador",
+    "Banco",
+    "D_BRAVO",
+    "Tipo de Liquidacion",
+    "Ahorro total",
+    "Por cobrar",
+    "Meses en el Programa",
+    "MORA",
+    "Descuento Requerido",
+    "Pago_banco_esperado",
+    "Potencial",
+    "Estructurable",
+    "Potencial Credito",
+    "Ingreso_esperado",
+    "Descuento_Actualizacion",
+    "Fecha Actualizacion",
+    "Actualizado Por",
+    "Categoria Actualizacion",
+    "Pago a Banco actualizacion",
+    "Observación",
+    "Tipo de Actividad",
+    "Mora_estructurado",
+    "MORA_CREDITO",
+    "ultimo contacto",
+    "tipo_fila",
+    "Negociador liquidacion",
+    "Por?",
+    "Bucket",
+    "Nuevo",
 ]
 
 # =========================================================
@@ -112,6 +162,21 @@ def ensure_columns(base_header, must_have):
             header.append(c)
     return header
 
+def apply_preferred_order(df: pd.DataFrame, header: list) -> list:
+    """
+    Header final:
+    - Primero columnas en PREFERRED_ORDER que existan
+    - Luego el resto (sin duplicar)
+    - Luego cualquier columna extra del DF
+    """
+    pref = [c for c in PREFERRED_ORDER if c in df.columns]
+    rest = [c for c in header if c in df.columns and c not in pref]
+    final_header = pref + rest
+    for c in df.columns:
+        if c not in final_header:
+            final_header.append(c)
+    return final_header
+
 def df_to_rows(df, header):
     return df.reindex(columns=header, fill_value="").astype(str).values.tolist()
 
@@ -127,10 +192,7 @@ def main():
         print("Funnel vacío")
         return
 
-    req = [
-        COL_REF, COL_BUCKET, COL_NEGOCIADOR,
-        COL_INSERTED_AT, COL_TIPO_ACT, COL_STATUS
-    ]
+    req = [COL_REF, COL_BUCKET, COL_NEGOCIADOR, COL_INSERTED_AT, COL_TIPO_ACT, COL_STATUS]
     for c in req:
         if c not in df.columns:
             raise RuntimeError(f"Falta columna {c} en Funnel")
@@ -147,7 +209,6 @@ def main():
     df_today = df[df["_inserted_dt"].dt.date == today].copy()
     if df_today.empty:
         print("Hoy no hay actividad")
-        # Si quieres que igual sincronice, comenta este return.
         return
 
     # ------------------ Cupos ponderados ------------------
@@ -163,49 +224,53 @@ def main():
         .sum().astype(int).to_dict()
     )
 
-    # =========================================================
-    # NUEVO: definir hasta qué bucket “vamos” hoy (máximo bucket procesado hoy)
-    # - si hoy solo hubo actividad en buckets 0/1/2, entonces bucket_actual_max = 2
-    # - si hoy hubo bucket 5, entonces bucket_actual_max = 5
-    # Esto implementa tu regla: si una ref se mueve a un bucket mayor al que vamos,
-    # debe salir del Bucket (destino) para esperar su turno.
-    # =========================================================
     bucket_actual_max = int(df_today[COL_BUCKET].max())
 
     # ------------------ Bucket sheet ------------------
     sh_b, ws_b = get_or_create_worksheet(gc, BUCKET_SHEET_ID, BUCKET_TAB_NAME)
     values = ws_b.get_all_values()
 
+    # Columnas del funnel (pero renombradas a como quieres en Bucket)
     funnel_cols = [c for c in df.columns.tolist() if c != "_inserted_dt"]
-    desired_header = ensure_columns(funnel_cols, [COL_NUEVO])
-    desired_header = ensure_columns(desired_header, UPDATE_COLS)
+    funnel_cols_bucket_names = [FUNNEL_TO_BUCKET_RENAME.get(c, c) for c in funnel_cols]
+
+    # Header deseado: lo que venga del funnel (con rename) + Nuevo
+    desired_header = ensure_columns(funnel_cols_bucket_names, [COL_NUEVO])
 
     if not values:
-        header = desired_header
+        # Si está vacío, creamos header final ya ordenado
+        tmp = pd.DataFrame(columns=desired_header)
+        header = apply_preferred_order(tmp, desired_header)
         ws_b.update("A1", [header])
         df_bucket = pd.DataFrame(columns=header)
         current_header = header
     else:
         current_header = [_norm_col(c) for c in values[0]]
-        header = ensure_columns(current_header, desired_header)
 
-        if header != current_header:
-            ws_b.update("A1", [header])
+        # Si en el Bucket aún quedaran nombres viejos, migrarlos a los nuevos
+        current_header = [FUNNEL_TO_BUCKET_RENAME.get(c, c) for c in current_header]
 
         rows = values[1:]
-        df_bucket = pd.DataFrame(rows, columns=current_header)
+        df_bucket = pd.DataFrame(rows, columns=[_norm_col(c) for c in values[0]])
         df_bucket.columns = [_norm_col(c) for c in df_bucket.columns]
+        df_bucket.rename(columns=FUNNEL_TO_BUCKET_RENAME, inplace=True)
 
+        # Asegurar columnas mínimas (sin imponer “orden funnel”)
+        header = ensure_columns(current_header, desired_header)
+
+        # Asegurar que DF tenga todas las columnas del header
         for c in header:
             if c not in df_bucket.columns:
                 df_bucket[c] = ""
 
+        # Aplicar orden final preferido
+        header = apply_preferred_order(df_bucket, header)
+
+        if header != current_header:
+            ws_b.update("A1", [header])
+
     # =========================================================
-    # NUEVO (1): LIMPIEZA POR CAMBIO DE BUCKET (regla que pediste)
-    # Si una referencia ya está en Bucket, pero en Funnel su bucket actual
-    # es mayor que bucket_actual_max (lo que “vamos” hoy), entonces se borra del destino.
-    # - Se borra TODAS las filas de esa referencia.
-    # - Esto permite que vuelva a entrar cuando llegue su bucket.
+    # LIMPIEZA POR CAMBIO DE BUCKET
     # =========================================================
     removed_refs = set()
 
@@ -226,30 +291,27 @@ def main():
             )
         )
 
-        # Detectar refs en destino cuyo bucket actual excede el bucket que vamos hoy
         refs_in_bucket = df_bucket[COL_REF].astype(str).str.strip()
         to_remove = []
         for ref in refs_in_bucket.unique().tolist():
             b_now = funnel_bucket_map.get(ref, None)
             if b_now is None or pd.isna(b_now):
                 continue
-            b_now = int(b_now)
-            if b_now > bucket_actual_max:
+            if int(b_now) > bucket_actual_max:
                 to_remove.append(ref)
 
         if to_remove:
             removed_refs = set(to_remove)
             df_bucket = df_bucket[~df_bucket[COL_REF].isin(removed_refs)].copy()
 
-            # Como cambiamos filas, reescribimos el Bucket completo
-            # (y de paso dejamos "Nuevo" vacío)
             if COL_NUEVO in df_bucket.columns:
                 df_bucket[COL_NUEVO] = ""
 
+            # Re-escribir manteniendo header ordenado
             ws_b.update("A2", df_to_rows(df_bucket, header), value_input_option="USER_ENTERED")
 
     # =========================================================
-    # 1) SINCRONIZAR columnas dinámicas para referencias existentes (post-limpieza)
+    # SINCRONIZAR columnas dinámicas para referencias existentes (post-limpieza)
     # =========================================================
     updates_in_bucket = 0
 
@@ -257,22 +319,33 @@ def main():
         df_bucket[COL_REF] = df_bucket[COL_REF].astype(str).str.strip()
         existing_refs = set(df_bucket[COL_REF].tolist())
 
-        update_cols_present = [c for c in UPDATE_COLS if c in df.columns]
+        update_cols_present_funnel = [c for c in UPDATE_COLS_FUNNEL if c in df.columns]
+        update_cols_present_bucket = [FUNNEL_TO_BUCKET_RENAME.get(c, c) for c in update_cols_present_funnel]
 
-        if update_cols_present and existing_refs:
+        if update_cols_present_funnel and existing_refs:
             df_latest = (
                 df[df[COL_REF].isin(existing_refs)]
                 .sort_values("_inserted_dt")
                 .groupby(COL_REF, as_index=False)
-                .tail(1)
-                [[COL_REF] + update_cols_present]
+                .tail(1)[[COL_REF] + update_cols_present_funnel]
                 .copy()
             )
-            latest_map = df_latest.set_index(COL_REF)[update_cols_present].astype(str).to_dict(orient="index")
 
-            for c in update_cols_present:
+            # Renombrar a nombres finales del Bucket
+            df_latest.rename(columns=FUNNEL_TO_BUCKET_RENAME, inplace=True)
+
+            latest_map = (
+                df_latest.set_index(COL_REF)[update_cols_present_bucket]
+                .astype(str)
+                .to_dict(orient="index")
+            )
+
+            # Asegurar columnas
+            for c in update_cols_present_bucket:
                 if c not in df_bucket.columns:
                     df_bucket[c] = ""
+                    if c not in header:
+                        header.append(c)
 
             for ref in existing_refs:
                 if ref not in latest_map:
@@ -287,6 +360,10 @@ def main():
             if updates_in_bucket > 0:
                 if COL_NUEVO in df_bucket.columns:
                     df_bucket[COL_NUEVO] = ""
+
+                # Re-aplicar orden preferido y reescribir header + data
+                header = apply_preferred_order(df_bucket, header)
+                ws_b.update("A1", [header])
                 ws_b.update("A2", df_to_rows(df_bucket, header), value_input_option="USER_ENTERED")
 
     # ------------------ limpiar "Nuevo" (seguro) ------------------
@@ -356,6 +433,14 @@ def main():
 
     df_out = df_out.drop(columns=["_inserted_dt"], errors="ignore")
 
+    # Renombrar a nombres finales (Bucket)
+    df_out.rename(columns=FUNNEL_TO_BUCKET_RENAME, inplace=True)
+
+    # Asegurar header y orden (mantener lo que ya tienes)
+    header = ensure_columns(header, df_out.columns.tolist())
+    header = apply_preferred_order(pd.concat([df_bucket, df_out], ignore_index=True) if not df_bucket.empty else df_out, header)
+    ws_b.update("A1", [header])
+
     ws_b.append_rows(df_to_rows(df_out, header), value_input_option="USER_ENTERED")
 
     print(
@@ -365,7 +450,6 @@ def main():
         f"Referencias asignadas: {len(set(chosen_refs))} | "
         f"Filas insertadas: {len(df_out)}"
     )
-
 
 if __name__ == "__main__":
     main()
