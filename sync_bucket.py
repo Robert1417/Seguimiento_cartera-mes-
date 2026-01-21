@@ -40,7 +40,6 @@ UPDATE_COLS_FUNNEL = [
 
 # =========================================================
 # PRESENTACIÓN EN BUCKET: renombres + orden deseado
-# (mismos que ya dejaste funcionando en updates_only)
 # =========================================================
 FUNNEL_TO_BUCKET_RENAME = {
     "BANCOS_ESTANDAR": "Banco",
@@ -205,25 +204,47 @@ def main():
 
     df["_inserted_dt"] = _parse_date_series(df[COL_INSERTED_AT])
 
-    today = pd.Timestamp.now(tz=TZ).date()
+    # =========================================================
+    # ACTIVIDAD DEL DÍA (para ejecutar flujo) vs CUPOS (regla nueva)
+    # - df_today: SOLO HOY (mantiene bucket_actual_max y regla de ejecución)
+    # - df_quota: HOY + (AYER solo EFECTIVA & LIQUIDADO) para calcular quotas
+    # =========================================================
+    now = pd.Timestamp.now(tz=TZ)
+    today = now.date()
+    yesterday = (now - pd.Timedelta(days=1)).date()
+
     df_today = df[df["_inserted_dt"].dt.date == today].copy()
     if df_today.empty:
         print("Hoy no hay actividad")
         return
 
-    # ------------------ Cupos ponderados ------------------
-    tipo = df_today[COL_TIPO_ACT].astype(str).str.upper().str.strip()
-    status = df_today[COL_STATUS].astype(str).str.upper().str.strip()
+    # Dataset especial para cupos:
+    # - HOY completo
+    # - AYER solo EFECTIVA + LIQUIDADO
+    df_yesterday = df[df["_inserted_dt"].dt.date == yesterday].copy()
+    if not df_yesterday.empty:
+        tipo_y = df_yesterday[COL_TIPO_ACT].astype(str).str.upper().str.strip()
+        status_y = df_yesterday[COL_STATUS].astype(str).str.upper().str.strip()
+        df_yesterday_special = df_yesterday[tipo_y.eq("EFECTIVA") & status_y.eq("LIQUIDADO")].copy()
+    else:
+        df_yesterday_special = df_yesterday  # vacío
 
-    df_today["_peso"] = 2
-    df_today.loc[tipo.eq("EFECTIVA"), "_peso"] = 4
-    df_today.loc[tipo.eq("EFECTIVA") & status.eq("LIQUIDADO"), "_peso"] = 6
+    df_quota = pd.concat([df_today, df_yesterday_special], ignore_index=True)
+
+    # ------------------ Cupos ponderados ------------------
+    tipo_q = df_quota[COL_TIPO_ACT].astype(str).str.upper().str.strip()
+    status_q = df_quota[COL_STATUS].astype(str).str.upper().str.strip()
+
+    df_quota["_peso"] = 2
+    df_quota.loc[tipo_q.eq("EFECTIVA"), "_peso"] = 4
+    df_quota.loc[tipo_q.eq("EFECTIVA") & status_q.eq("LIQUIDADO"), "_peso"] = 6
 
     quotas = (
-        df_today.groupby(COL_NEGOCIADOR)["_peso"]
+        df_quota.groupby(COL_NEGOCIADOR)["_peso"]
         .sum().astype(int).to_dict()
     )
 
+    # bucket_actual_max se mantiene SOLO con HOY (como venía)
     bucket_actual_max = int(df_today[COL_BUCKET].max())
 
     # ------------------ Bucket sheet ------------------
@@ -238,7 +259,6 @@ def main():
     desired_header = ensure_columns(funnel_cols_bucket_names, [COL_NUEVO])
 
     if not values:
-        # Si está vacío, creamos header final ya ordenado
         tmp = pd.DataFrame(columns=desired_header)
         header = apply_preferred_order(tmp, desired_header)
         ws_b.update("A1", [header])
@@ -246,8 +266,6 @@ def main():
         current_header = header
     else:
         current_header = [_norm_col(c) for c in values[0]]
-
-        # Si en el Bucket aún quedaran nombres viejos, migrarlos a los nuevos
         current_header = [FUNNEL_TO_BUCKET_RENAME.get(c, c) for c in current_header]
 
         rows = values[1:]
@@ -255,15 +273,12 @@ def main():
         df_bucket.columns = [_norm_col(c) for c in df_bucket.columns]
         df_bucket.rename(columns=FUNNEL_TO_BUCKET_RENAME, inplace=True)
 
-        # Asegurar columnas mínimas (sin imponer “orden funnel”)
         header = ensure_columns(current_header, desired_header)
 
-        # Asegurar que DF tenga todas las columnas del header
         for c in header:
             if c not in df_bucket.columns:
                 df_bucket[c] = ""
 
-        # Aplicar orden final preferido
         header = apply_preferred_order(df_bucket, header)
 
         if header != current_header:
@@ -277,7 +292,6 @@ def main():
     if not df_bucket.empty and COL_REF in df_bucket.columns:
         df_bucket[COL_REF] = df_bucket[COL_REF].astype(str).str.strip()
 
-        # Último bucket por referencia en Funnel (estado actual)
         df_funnel_latest_bucket = (
             df.sort_values("_inserted_dt")
               .groupby(COL_REF, as_index=False)
@@ -307,7 +321,6 @@ def main():
             if COL_NUEVO in df_bucket.columns:
                 df_bucket[COL_NUEVO] = ""
 
-            # Re-escribir manteniendo header ordenado
             ws_b.update("A2", df_to_rows(df_bucket, header), value_input_option="USER_ENTERED")
 
     # =========================================================
@@ -331,7 +344,6 @@ def main():
                 .copy()
             )
 
-            # Renombrar a nombres finales del Bucket
             df_latest.rename(columns=FUNNEL_TO_BUCKET_RENAME, inplace=True)
 
             latest_map = (
@@ -340,7 +352,6 @@ def main():
                 .to_dict(orient="index")
             )
 
-            # Asegurar columnas
             for c in update_cols_present_bucket:
                 if c not in df_bucket.columns:
                     df_bucket[c] = ""
@@ -361,7 +372,6 @@ def main():
                 if COL_NUEVO in df_bucket.columns:
                     df_bucket[COL_NUEVO] = ""
 
-                # Re-aplicar orden preferido y reescribir header + data
                 header = apply_preferred_order(df_bucket, header)
                 ws_b.update("A1", [header])
                 ws_b.update("A2", df_to_rows(df_bucket, header), value_input_option="USER_ENTERED")
@@ -430,15 +440,15 @@ def main():
     # ------------------ Insertar (todas las filas de esas referencias) ------------------
     df_out = df[df[COL_REF].isin(chosen_refs)].copy()
     df_out[COL_NUEVO] = "Nuevo"
-
     df_out = df_out.drop(columns=["_inserted_dt"], errors="ignore")
 
-    # Renombrar a nombres finales (Bucket)
     df_out.rename(columns=FUNNEL_TO_BUCKET_RENAME, inplace=True)
 
-    # Asegurar header y orden (mantener lo que ya tienes)
     header = ensure_columns(header, df_out.columns.tolist())
-    header = apply_preferred_order(pd.concat([df_bucket, df_out], ignore_index=True) if not df_bucket.empty else df_out, header)
+    header = apply_preferred_order(
+        pd.concat([df_bucket, df_out], ignore_index=True) if not df_bucket.empty else df_out,
+        header
+    )
     ws_b.update("A1", [header])
 
     ws_b.append_rows(df_to_rows(df_out, header), value_input_option="USER_ENTERED")
