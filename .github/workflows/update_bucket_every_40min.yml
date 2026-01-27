@@ -1,16 +1,20 @@
-name: Update Bucket Columns (cada 1h25m)
+name: Update Bucket Columns (cada 45m desde 8:45)
 
 on:
   schedule:
     # Horarios en UTC (Bogotá = UTC-5)
-    - cron: "45 13 * * *"  # 08:45 Bogota
-    - cron: "35 16 * * *"  # 11:35 Bogota
-    - cron: "25 19 * * *"  # 14:25 Bogota
-    - cron: "50 20 * * *"  # 15:50 Bogota
-    - cron: "15 22 * * *"  # 17:15 Bogota
-    - cron: "40 23 * * *"  # 18:40 Bogota
+    - cron: "45 13 * * *"  # 08:45
+    - cron: "30 14 * * *"  # 09:30
+    - cron: "15 15 * * *"  # 10:15
+    - cron: "45 16 * * *"  # 11:45
+    - cron: "30 17 * * *"  # 12:30
+    - cron: "15 18 * * *"  # 13:15
+    - cron: "45 19 * * *"  # 14:45
+    - cron: "30 20 * * *"  # 15:30
+    - cron: "15 21 * * *"  # 16:15
+    - cron: "45 22 * * *"  # 17:45
+    - cron: "30 23 * * *"  # 18:30
 
-  # Permite ejecutarlo manualmente si quieres
   workflow_dispatch: {}
 
 jobs:
