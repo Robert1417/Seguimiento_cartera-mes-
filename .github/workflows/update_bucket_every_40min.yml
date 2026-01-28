@@ -17,9 +17,14 @@ on:
 
   workflow_dispatch: {}
 
+# Evita ejecuciones simultáneas (si una se demora y arranca la otra)
+concurrency:
+  group: update-bucket-columns
+  cancel-in-progress: true
+
 jobs:
   run-updates-only:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout repo
@@ -29,11 +34,24 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
-      - name: Install dependencies
+      - name: Install dependencies (with retries)
+        shell: bash
         run: |
+          set -e
           python -m pip install --upgrade pip
-          pip install pandas gspread google-auth
+
+          # Reintento por fallos intermitentes de red/PyPI
+          for i in 1 2 3 4 5; do
+            echo "Attempt $i installing deps..."
+            pip install pandas gspread google-auth --retries 5 --timeout 60 && break
+            if [ "$i" -eq 5 ]; then
+              echo "Failed installing dependencies after retries."
+              exit 1
+            fi
+            sleep $((2**i))
+          done
 
       - name: Run sync (updates only)
         env:
