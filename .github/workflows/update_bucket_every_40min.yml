@@ -14,10 +14,8 @@ on:
     - cron: "15 21 * * *"  # 16:15
     - cron: "45 22 * * *"  # 17:45
     - cron: "30 23 * * *"  # 18:30
-
   workflow_dispatch: {}
 
-# Evita ejecuciones simultáneas (si una se demora y arranca la otra)
 concurrency:
   group: update-bucket-columns
   cancel-in-progress: true
@@ -42,19 +40,58 @@ jobs:
           set -e
           python -m pip install --upgrade pip
 
-          # Reintento por fallos intermitentes de red/PyPI
           for i in 1 2 3 4 5; do
             echo "Attempt $i installing deps..."
             pip install pandas gspread google-auth --retries 5 --timeout 60 && break
             if [ "$i" -eq 5 ]; then
-              echo "Failed installing dependencies after retries."
+              echo "Failed installing dependencies."
               exit 1
             fi
             sleep $((2**i))
           done
 
-      - name: Run sync (updates only)
+      # ✅ Convierte el secret JSON en un archivo y configura credenciales estándar
+      - name: Prepare Google credentials file
+        shell: bash
         env:
           MI_JSON: ${{ secrets.MI_JSON }}
         run: |
-          python sync_bucket_updates_only.py
+          set -euo pipefail
+
+          # Verifica que exista (sin imprimirlo)
+          if [ -z "${MI_JSON}" ]; then
+            echo "MI_JSON secret is empty or not available."
+            exit 1
+          fi
+
+          # Escribe el JSON a un archivo
+          echo "$MI_JSON" > /tmp/gcp_sa.json
+
+          # Validación rápida de que sea JSON válido (sin mostrar contenido)
+          python - <<'PY'
+          import json
+          with open("/tmp/gcp_sa.json","r",encoding="utf-8") as f:
+            json.load(f)
+          print("Service account JSON: OK")
+          PY
+
+      - name: Run sync (updates only) with retries
+        shell: bash
+        env:
+          # estándar para librerías de Google
+          GOOGLE_APPLICATION_CREDENTIALS: /tmp/gcp_sa.json
+          # por si tu script usa MI_JSON directamente
+          MI_JSON: ${{ secrets.MI_JSON }}
+        run: |
+          set -euo pipefail
+
+          # Reintenta por fallos temporales (429/503/timeouts)
+          for i in 1 2 3 4; do
+            echo "Attempt $i running sync..."
+            python -u sync_bucket_updates_only.py && exit 0
+            echo "Sync failed. Retrying..."
+            sleep $((2**i))
+          done
+
+          echo "Sync failed after retries."
+          exit 1
