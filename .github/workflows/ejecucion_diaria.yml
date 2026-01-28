@@ -3,19 +3,24 @@ name: Ejecucion timeline cartera
 on:
   workflow_dispatch:
   schedule:
-    # LUN–VIE (COL 8:00–17:00) cada hora
+    # LUN–VIE (COL 8:00–17:00) cada hora (UTC 13–22)
     - cron: "0 13-22 * * 1-5"
-
-    # SÁBADO (COL 9:00–14:00) cada hora
+    # SÁBADO (COL 9:00–14:00) cada hora (UTC 14–19)
     - cron: "0 14-19 * * 6"
+
+# Evita que dos ejecuciones se pisen (muy común en jobs por cron)
+concurrency:
+  group: ejecucion-timeline-cartera
+  cancel-in-progress: true
 
 permissions:
   contents: write
 
 jobs:
   run:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     env:
+      # Con uno basta; dejo ambos por compatibilidad con tu código actual
       GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.MI_JSON }}
       MI_JSON: ${{ secrets.MI_JSON }}
 
@@ -23,31 +28,65 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # 👈 IMPORTANTE para poder hacer pull/rebase
+          fetch-depth: 0
+          persist-credentials: true
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
-      - name: Install deps
+      - name: Install deps (with retries)
+        shell: bash
         run: |
+          set -e
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
-          python -m pip install nbconvert ipykernel
+
+          # Reintento simple por si PyPI/red falla intermitente
+          for i in 1 2 3 4 5; do
+            echo "Attempt $i installing requirements..."
+            pip install -r requirements.txt --retries 5 --timeout 60 && break
+            if [ "$i" -eq 5 ]; then
+              echo "Failed installing requirements after retries."
+              exit 1
+            fi
+            sleep $((2**i))
+          done
+
+          pip install nbconvert ipykernel --retries 5 --timeout 60
 
       - name: Run notebook
         run: |
-          jupyter nbconvert --to notebook --execute "EJECUCIÓN_DIARIA_TIMELINE_CARTERA.ipynb" --output "EJECUCIÓN_DIARIA_TIMELINE_CARTERA_out.ipynb"
+          jupyter nbconvert --to notebook --execute "EJECUCIÓN_DIARIA_TIMELINE_CARTERA.ipynb" \
+            --output "EJECUCIÓN_DIARIA_TIMELINE_CARTERA_out.ipynb"
 
-      - name: Commit changes
+      - name: Commit & push changes (rebase)
+        shell: bash
         run: |
+          set -e
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           git add -A
-          git commit -m "Auto update" || exit 0
 
-          # 👇 CLAVE: integrar cambios remotos antes de pushear
-          git pull --rebase origin main
-          git push origin main
+          # Si no hay cambios, salir limpio
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit -m "Auto update"
+
+          # Rebase antes de pushear + reintento por conflictos/carreras
+          for i in 1 2 3; do
+            git pull --rebase origin main || true
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "Push failed, retrying..."
+            sleep $((2**i))
+          done
+
+          echo "Push failed after retries."
+          exit 1
