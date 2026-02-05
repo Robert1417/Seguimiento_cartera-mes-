@@ -39,6 +39,16 @@ UPDATE_COLS_FUNNEL = [
 ]
 
 # =========================================================
+# COLUMNAS QUE NO SE DEBEN SUBIR/SINCRONIZAR A BUCKET
+# (Si no existen en Bucket, NO se crean; si existen en Funnel, se ignoran)
+# =========================================================
+EXCLUDE_COLS_BUCKET = [
+    "tipo_fila",
+    "Negociador liquidacion",
+    "Por?",
+]
+
+# =========================================================
 # PRESENTACIÓN EN BUCKET: renombres + orden deseado
 # =========================================================
 FUNNEL_TO_BUCKET_RENAME = {
@@ -80,9 +90,10 @@ PREFERRED_ORDER = [
     "Mora_estructurado",
     "MORA_CREDITO",
     "ultimo contacto",
-    "tipo_fila",
-    "Negociador liquidacion",
-    "Por?",
+    # OJO: se quitaron del orden porque NO deben existir en Bucket:
+    # "tipo_fila",
+    # "Negociador liquidacion",
+    # "Por?",
     "Bucket",
     "Nuevo",
 ]
@@ -101,6 +112,17 @@ def _parse_date_series(x):
             errors="coerce"
         )
     return dt
+
+def _drop_excluded(df: pd.DataFrame) -> pd.DataFrame:
+    """Elimina columnas excluidas si existen."""
+    cols = [c for c in EXCLUDE_COLS_BUCKET if c in df.columns]
+    if cols:
+        df = df.drop(columns=cols, errors="ignore")
+    return df
+
+def _filter_header_excluded(header: list) -> list:
+    """Elimina columnas excluidas del header."""
+    return [c for c in header if c not in EXCLUDE_COLS_BUCKET]
 
 def get_gspread_client():
     """
@@ -252,34 +274,49 @@ def main():
     values = ws_b.get_all_values()
 
     # Columnas del funnel (pero renombradas a como quieres en Bucket)
-    funnel_cols = [c for c in df.columns.tolist() if c != "_inserted_dt"]
-    funnel_cols_bucket_names = [FUNNEL_TO_BUCKET_RENAME.get(c, c) for c in funnel_cols]
+    # -> EXCLUYE columnas prohibidas
+    funnel_cols = [
+        c for c in df.columns.tolist()
+        if c != "_inserted_dt" and c not in EXCLUDE_COLS_BUCKET
+    ]
+
+    funnel_cols_bucket_names = [
+        FUNNEL_TO_BUCKET_RENAME.get(c, c)
+        for c in funnel_cols
+        if FUNNEL_TO_BUCKET_RENAME.get(c, c) not in EXCLUDE_COLS_BUCKET
+    ]
 
     # Header deseado: lo que venga del funnel (con rename) + Nuevo
     desired_header = ensure_columns(funnel_cols_bucket_names, [COL_NUEVO])
+    desired_header = _filter_header_excluded(desired_header)
 
     if not values:
         tmp = pd.DataFrame(columns=desired_header)
         header = apply_preferred_order(tmp, desired_header)
+        header = _filter_header_excluded(header)
         ws_b.update("A1", [header])
         df_bucket = pd.DataFrame(columns=header)
         current_header = header
     else:
         current_header = [_norm_col(c) for c in values[0]]
         current_header = [FUNNEL_TO_BUCKET_RENAME.get(c, c) for c in current_header]
+        current_header = _filter_header_excluded(current_header)
 
         rows = values[1:]
         df_bucket = pd.DataFrame(rows, columns=[_norm_col(c) for c in values[0]])
         df_bucket.columns = [_norm_col(c) for c in df_bucket.columns]
         df_bucket.rename(columns=FUNNEL_TO_BUCKET_RENAME, inplace=True)
+        df_bucket = _drop_excluded(df_bucket)
 
         header = ensure_columns(current_header, desired_header)
+        header = _filter_header_excluded(header)
 
         for c in header:
             if c not in df_bucket.columns:
                 df_bucket[c] = ""
 
         header = apply_preferred_order(df_bucket, header)
+        header = _filter_header_excluded(header)
 
         if header != current_header:
             ws_b.update("A1", [header])
@@ -321,6 +358,10 @@ def main():
             if COL_NUEVO in df_bucket.columns:
                 df_bucket[COL_NUEVO] = ""
 
+            # Asegurar exclusión antes de escribir
+            df_bucket = _drop_excluded(df_bucket)
+            header = _filter_header_excluded(header)
+
             ws_b.update("A2", df_to_rows(df_bucket, header), value_input_option="USER_ENTERED")
 
     # =========================================================
@@ -332,8 +373,15 @@ def main():
         df_bucket[COL_REF] = df_bucket[COL_REF].astype(str).str.strip()
         existing_refs = set(df_bucket[COL_REF].tolist())
 
-        update_cols_present_funnel = [c for c in UPDATE_COLS_FUNNEL if c in df.columns]
-        update_cols_present_bucket = [FUNNEL_TO_BUCKET_RENAME.get(c, c) for c in update_cols_present_funnel]
+        update_cols_present_funnel = [
+            c for c in UPDATE_COLS_FUNNEL
+            if c in df.columns and c not in EXCLUDE_COLS_BUCKET
+        ]
+        update_cols_present_bucket = [
+            FUNNEL_TO_BUCKET_RENAME.get(c, c)
+            for c in update_cols_present_funnel
+            if FUNNEL_TO_BUCKET_RENAME.get(c, c) not in EXCLUDE_COLS_BUCKET
+        ]
 
         if update_cols_present_funnel and existing_refs:
             df_latest = (
@@ -345,6 +393,7 @@ def main():
             )
 
             df_latest.rename(columns=FUNNEL_TO_BUCKET_RENAME, inplace=True)
+            df_latest = _drop_excluded(df_latest)
 
             latest_map = (
                 df_latest.set_index(COL_REF)[update_cols_present_bucket]
@@ -358,11 +407,15 @@ def main():
                     if c not in header:
                         header.append(c)
 
+            header = _filter_header_excluded(header)
+
             for ref in existing_refs:
                 if ref not in latest_map:
                     continue
                 mask = df_bucket[COL_REF].eq(ref)
                 for c, new_val in latest_map[ref].items():
+                    if c in EXCLUDE_COLS_BUCKET:
+                        continue
                     old_vals = df_bucket.loc[mask, c].astype(str)
                     if (old_vals != str(new_val)).any():
                         df_bucket.loc[mask, c] = str(new_val)
@@ -372,7 +425,10 @@ def main():
                 if COL_NUEVO in df_bucket.columns:
                     df_bucket[COL_NUEVO] = ""
 
+                df_bucket = _drop_excluded(df_bucket)
                 header = apply_preferred_order(df_bucket, header)
+                header = _filter_header_excluded(header)
+
                 ws_b.update("A1", [header])
                 ws_b.update("A2", df_to_rows(df_bucket, header), value_input_option="USER_ENTERED")
 
@@ -443,12 +499,17 @@ def main():
     df_out = df_out.drop(columns=["_inserted_dt"], errors="ignore")
 
     df_out.rename(columns=FUNNEL_TO_BUCKET_RENAME, inplace=True)
+    df_out = _drop_excluded(df_out)
 
     header = ensure_columns(header, df_out.columns.tolist())
+    header = _filter_header_excluded(header)
+
     header = apply_preferred_order(
         pd.concat([df_bucket, df_out], ignore_index=True) if not df_bucket.empty else df_out,
         header
     )
+    header = _filter_header_excluded(header)
+
     ws_b.update("A1", [header])
 
     ws_b.append_rows(df_to_rows(df_out, header), value_input_option="USER_ENTERED")
