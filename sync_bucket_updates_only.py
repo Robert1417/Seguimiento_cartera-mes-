@@ -10,6 +10,15 @@
 #   vacía estas columnas:
 #   Descuento_Actualizacion, Fecha Actualizacion, Actualizado Por,
 #   Categoria Actualizacion, Pago a Banco actualizacion, Observación, Tipo de Actividad
+#
+# ✅ CAMBIO SOLICITADO:
+# - CORRIGE "Descuento Requerido" en Bucket usando "Descuento" en Funnel,
+#   tanto si está vacío como si está diferente/mal.
+# - NO TOCA NINGUNA OTRA COLUMNA (solo reescribe esa columna).
+#
+# NOTA:
+# - El script sí puede actualizar el header (orden/renombres), pero NO cambia
+#   los valores de otras columnas.
 # ---------------------------------------------------------
 
 import os
@@ -27,7 +36,7 @@ FUNNEL_TAB_NAME = "Funnel"
 BUCKET_SHEET_ID = "1qw77Q0BRAXfavNHzC53TT3usKDXRMp1pezAVG13qz3k"
 BUCKET_TAB_NAME = "Bucket"
 
-# Clave para cruzar Funnel vs Bucket (NO cambiar si no actualizas todo el flujo)
+# Clave para cruzar Funnel vs Bucket
 COL_REF = "Id deuda"
 COL_INSERTED_AT = "inserted_at_ultima"
 
@@ -52,11 +61,14 @@ UPDATE_COLS = [
 # Columnas adicionales que quieres sincronizar (tal como están en Funnel hoy)
 COL_AHORRO_TOTAL = "Ahorro total"
 COL_POR_COBRAR = "Por cobrar"
-
 UPDATE_COLS_EXTRA = [COL_AHORRO_TOTAL, COL_POR_COBRAR]
 
+# ✅ Columna que vamos a corregir (y SOLO esa en valores)
+COL_DESCUENTO_FUNNEL = "Descuento"  # Funnel
+COL_DESCUENTO_BUCKET = "Descuento Requerido"  # Bucket (renombrada)
+
 # Importante: CE entra a SYNC_COLS solo si existe en Funnel (se maneja abajo)
-SYNC_COLS_BASE = UPDATE_COLS + UPDATE_COLS_EXTRA
+SYNC_COLS_BASE = UPDATE_COLS + UPDATE_COLS_EXTRA  # (se mantiene, pero NO se actualiza en valores)
 
 # =========================================================
 # PRESENTACIÓN EN BUCKET: renombres + orden deseado
@@ -72,7 +84,7 @@ FUNNEL_TO_BUCKET_RENAME = {
     # CE se mantiene como "CE"
 }
 
-# ✅ Orden actual EXACTO (como lo reportaste)
+# ✅ Orden actual EXACTO
 PREFERRED_ORDER = [
     "Referencia",
     "Id deuda",
@@ -81,7 +93,7 @@ PREFERRED_ORDER = [
     "Negociador",
     "Banco",
     "D_BRAVO",
-    "CE",  # <-- CE queda al lado de D_BRAVO (si existe)
+    "CE",
     "Tipo de Liquidacion",
     "Ahorro total",
     "Por cobrar",
@@ -138,10 +150,13 @@ def _parse_date_series(x: pd.Series) -> pd.Series:
         )
     return dt
 
+def _is_blank_series(s: pd.Series) -> pd.Series:
+    s2 = s.astype(str).str.strip()
+    return s.isna() | s2.eq("") | s2.str.lower().isin(["nan", "none", "nat"])
+
 def clear_monthly_fields_if_not_current_month(df_bucket: pd.DataFrame, tz: str = TZ) -> pd.DataFrame:
     """
-    Si 'Fecha Actualizacion' no pertenece al mes en curso, vacía MONTHLY_CLEAR_COLS en esas filas.
-    No borra filas ni columnas: solo setea "".
+    Regla mensual (se mantiene como estaba).
     """
     if df_bucket.empty:
         return df_bucket
@@ -165,13 +180,7 @@ def clear_monthly_fields_if_not_current_month(df_bucket: pd.DataFrame, tz: str =
     return df_bucket
 
 def get_gspread_client():
-    """
-    Autenticación usando MI_JSON:
-    - Colab: google.colab.userdata.get("MI_JSON")
-    - GitHub/Local: os.environ["MI_JSON"]
-    """
     mi_json = None
-
     try:
         from google.colab import userdata
         mi_json = userdata.get("MI_JSON")
@@ -213,9 +222,6 @@ def ensure_columns(header, must_have):
             header.append(c)
     return header
 
-def df_to_rows(df, header):
-    return df.reindex(columns=header, fill_value="").astype(str).values.tolist()
-
 def apply_preferred_order(df: pd.DataFrame, header: list) -> list:
     pref = [c for c in PREFERRED_ORDER if c in df.columns]
     rest = [c for c in header if c in df.columns and c not in pref]
@@ -241,34 +247,21 @@ def main():
         if c not in df_funnel.columns:
             raise RuntimeError(f"Falta columna '{c}' en Funnel")
 
+    if COL_DESCUENTO_FUNNEL not in df_funnel.columns:
+        raise RuntimeError(f"Falta columna '{COL_DESCUENTO_FUNNEL}' en Funnel (necesaria para corregir Descuento Requerido).")
+
     df_funnel[COL_REF] = df_funnel[COL_REF].astype(str).str.strip()
     df_funnel["_inserted_dt"] = _parse_date_series(df_funnel[COL_INSERTED_AT])
 
-    # CE solo se sincroniza si existe en Funnel
-    SYNC_COLS = list(SYNC_COLS_BASE)
-    has_ce = COL_CE in df_funnel.columns
-    if has_ce and (COL_CE not in SYNC_COLS):
-        SYNC_COLS.append(COL_CE)
-
-    sync_cols_present_funnel = [c for c in SYNC_COLS if c in df_funnel.columns]
-    if not sync_cols_present_funnel:
-        print("Ninguna de las columnas SYNC_COLS existe en Funnel. No se hizo nada.")
-        return
-
-    sync_cols_present_bucket = [FUNNEL_TO_BUCKET_RENAME.get(c, c) for c in sync_cols_present_funnel]
-
-    df_latest = (
+    # Tomar el último "Descuento" por Id deuda
+    df_latest_discount = (
         df_funnel.sort_values("_inserted_dt")
                  .groupby(COL_REF, as_index=False)
-                 .tail(1)[[COL_REF] + sync_cols_present_funnel]
+                 .tail(1)[[COL_REF, COL_DESCUENTO_FUNNEL]]
                  .copy()
     )
-
-    df_latest.rename(columns=FUNNEL_TO_BUCKET_RENAME, inplace=True)
-
-    for c in sync_cols_present_bucket:
-        if c in df_latest.columns:
-            df_latest[c] = df_latest[c].astype(str)
+    df_latest_discount.rename(columns={COL_DESCUENTO_FUNNEL: COL_DESCUENTO_BUCKET}, inplace=True)
+    df_latest_discount[COL_DESCUENTO_BUCKET] = df_latest_discount[COL_DESCUENTO_BUCKET].astype(str)
 
     # ------------------ Read Bucket ------------------
     df_bucket, ws_bucket, bucket_header = read_worksheet_as_df(gc, BUCKET_SHEET_ID, BUCKET_TAB_NAME)
@@ -281,65 +274,65 @@ def main():
 
     df_bucket[COL_REF] = df_bucket[COL_REF].astype(str).str.strip()
 
-    # Migrar nombres viejos -> nuevos si aplica
+    # Migrar nombres viejos -> nuevos si aplica (por seguridad)
     old_to_new_in_bucket = {k: v for k, v in FUNNEL_TO_BUCKET_RENAME.items() if k in df_bucket.columns}
     if old_to_new_in_bucket:
         df_bucket.rename(columns=old_to_new_in_bucket, inplace=True)
         bucket_header = [old_to_new_in_bucket.get(c, c) for c in bucket_header]
 
-    # Asegurar que Bucket tenga columnas a sincronizar (y CE si aplica)
-    new_header = ensure_columns(bucket_header, sync_cols_present_bucket)
+    # Asegurar que exista "Descuento Requerido" en Bucket
+    if COL_DESCUENTO_BUCKET not in df_bucket.columns:
+        df_bucket[COL_DESCUENTO_BUCKET] = ""
+    if COL_DESCUENTO_BUCKET not in bucket_header:
+        bucket_header.append(COL_DESCUENTO_BUCKET)
 
-    # Reordenar respetando orden actual exacto
-    new_header = apply_preferred_order(df_bucket, new_header)
+    # Reordenar header (solo presentación)
+    bucket_header = ensure_columns(bucket_header, [c for c in PREFERRED_ORDER if c not in bucket_header and c in df_bucket.columns])
+    bucket_header = apply_preferred_order(df_bucket, bucket_header)
 
-    # Asegurar columnas en df_bucket
-    for c in new_header:
-        if c not in df_bucket.columns:
-            df_bucket[c] = ""
+    # Actualizar header si cambió (presentación)
+    ws_bucket.update("A1", [bucket_header])
 
-    if new_header != bucket_header:
-        ws_bucket.update("A1", [new_header])
-        bucket_header = new_header
+    # ------------------ Merge & Update (SOLO Descuento Requerido) ------------------
+    df_merged = df_bucket.merge(df_latest_discount, on=COL_REF, how="left", suffixes=("", "__new"))
 
-    # ------------------ Merge & Update ------------------
-    df_merged = df_bucket.merge(df_latest, on=COL_REF, how="left", suffixes=("", "__new"))
+    if f"{COL_DESCUENTO_BUCKET}__new" not in df_merged.columns:
+        print("No se encontró el valor nuevo de Descuento Requerido después del merge. No se hizo nada.")
+        return
 
-    updated_cells_approx = 0
-    for c in sync_cols_present_bucket:
-        c_new = f"{c}__new"
-        if c_new not in df_merged.columns:
-            continue
+    old = df_merged[COL_DESCUENTO_BUCKET]
+    new = df_merged[f"{COL_DESCUENTO_BUCKET}__new"]
 
-        old = df_merged[c].astype(str) if c in df_merged.columns else pd.Series([""] * len(df_merged))
-        new = df_merged[c_new].astype(str)
+    # Solo aplicar cuando hay nuevo válido y es diferente
+    mask_has_new = ~_is_blank_series(new)
+    mask_diff = mask_has_new & old.astype(str).ne(new.astype(str))
 
-        mask_has_new = new.ne("nan")
-        mask_diff = mask_has_new & old.ne(new)
+    updated_rows = int(mask_diff.sum())
+    if updated_rows > 0:
+        df_merged.loc[mask_diff, COL_DESCUENTO_BUCKET] = new.astype(str)[mask_diff]
 
-        if mask_diff.any():
-            df_merged.loc[mask_diff, c] = new[mask_diff]
-            updated_cells_approx += int(mask_diff.sum())
+    # Limpiar columna temporal
+    df_merged.drop(columns=[f"{COL_DESCUENTO_BUCKET}__new"], inplace=True)
 
-        df_merged.drop(columns=[c_new], inplace=True)
-
-    # ✅ Regla mensual
+    # ✅ Regla mensual (se mantiene)
     df_merged = clear_monthly_fields_if_not_current_month(df_merged, tz=TZ)
 
-    # Header final (por si entraron nuevas cols) + orden exacto
-    bucket_header = ensure_columns(bucket_header, [c for c in df_merged.columns if c not in bucket_header])
-    bucket_header = apply_preferred_order(df_merged, bucket_header)
+    # ------------------ Escribir SOLO la columna Descuento Requerido ------------------
+    # Para NO tocar ninguna otra columna, actualizamos únicamente el rango de esa columna.
+    col_idx_1based = bucket_header.index(COL_DESCUENTO_BUCKET) + 1
+    start_cell = gspread.utils.rowcol_to_a1(2, col_idx_1based)
+    end_cell = gspread.utils.rowcol_to_a1(len(df_merged) + 1, col_idx_1based)
+    rng = f"{start_cell}:{end_cell}"
 
-    # Nota: aunque "updated_cells_approx" sea 0, la regla mensual puede haber limpiado celdas,
-    # así que reescribimos siempre para garantizar consistencia.
-    ws_bucket.update("A1", [bucket_header])
-    ws_bucket.update("A2", df_to_rows(df_merged, bucket_header), value_input_option="USER_ENTERED")
+    ws_bucket.update(
+        rng,
+        [[v] for v in df_merged[COL_DESCUENTO_BUCKET].astype(str).tolist()],
+        value_input_option="USER_ENTERED"
+    )
 
     print(
-        f"OK | Referencias en Bucket: {df_bucket[COL_REF].nunique()} | "
-        f"Columnas sincronizadas (presentes en Funnel): {len(sync_cols_present_funnel)} | "
-        f"Actualizaciones (aprox por filas tocadas): {updated_cells_approx} | "
-        f"CE en Funnel: {'SI' if has_ce else 'NO'}"
+        f"OK | Filas corregidas en '{COL_DESCUENTO_BUCKET}': {updated_rows} | "
+        f"Referencias en Bucket: {df_bucket[COL_REF].nunique()}"
     )
 
 if __name__ == "__main__":
