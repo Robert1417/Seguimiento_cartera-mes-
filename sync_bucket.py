@@ -23,6 +23,9 @@ COL_TIPO_ACT = "Tipo de Actividad"
 COL_STATUS = "STATUS"
 COL_NUEVO = "Nuevo"
 
+# Columna nueva que quieres traer de Funnel
+COL_CE = "CE"
+
 TZ = "America/Bogota"
 
 # Columnas a sincronizar (NOMBRES COMO ESTÁN EN FUNNEL)
@@ -40,7 +43,6 @@ UPDATE_COLS_FUNNEL = [
 
 # =========================================================
 # COLUMNAS QUE NO SE DEBEN SUBIR/SINCRONIZAR A BUCKET
-# (Si no existen en Bucket, NO se crean; si existen en Funnel, se ignoran)
 # =========================================================
 EXCLUDE_COLS_BUCKET = [
     "tipo_fila",
@@ -59,8 +61,10 @@ FUNNEL_TO_BUCKET_RENAME = {
     "CATEGORIA_PRED_ultima": "Categoria Actualizacion",
     "payment_to_bank_ultima": "Pago a Banco actualizacion",
     "observations_ultima": "Observación",
+    # CE se mantiene como "CE" (no renombramos)
 }
 
+# ✅ CE va al lado de D_BRAVO
 PREFERRED_ORDER = [
     "Referencia",
     "Id deuda",
@@ -69,6 +73,7 @@ PREFERRED_ORDER = [
     "Negociador",
     "Banco",
     "D_BRAVO",
+    "CE",
     "Tipo de Liquidacion",
     "Ahorro total",
     "Por cobrar",
@@ -90,12 +95,24 @@ PREFERRED_ORDER = [
     "Mora_estructurado",
     "MORA_CREDITO",
     "ultimo contacto",
-    # OJO: se quitaron del orden porque NO deben existir en Bucket:
-    # "tipo_fila",
-    # "Negociador liquidacion",
-    # "Por?",
     "Bucket",
     "Nuevo",
+    "FASE",
+    "STATUS",
+]
+
+# =========================================================
+# REGLA NUEVA: limpiar columnas si Fecha Actualizacion NO es del mes actual
+# (NOMBRES FINALES EN BUCKET)
+# =========================================================
+MONTHLY_CLEAR_COLS = [
+    "Descuento_Actualizacion",
+    "Fecha Actualizacion",
+    "Actualizado Por",
+    "Categoria Actualizacion",
+    "Pago a Banco actualizacion",
+    "Observación",
+    "Tipo de Actividad",
 ]
 
 # =========================================================
@@ -114,22 +131,15 @@ def _parse_date_series(x):
     return dt
 
 def _drop_excluded(df: pd.DataFrame) -> pd.DataFrame:
-    """Elimina columnas excluidas si existen."""
     cols = [c for c in EXCLUDE_COLS_BUCKET if c in df.columns]
     if cols:
         df = df.drop(columns=cols, errors="ignore")
     return df
 
 def _filter_header_excluded(header: list) -> list:
-    """Elimina columnas excluidas del header."""
     return [c for c in header if c not in EXCLUDE_COLS_BUCKET]
 
 def get_gspread_client():
-    """
-    Autenticación usando MI_JSON:
-    - Colab: google.colab.userdata.get("MI_JSON")
-    - GitHub/Local: os.environ["MI_JSON"]
-    """
     mi_json = None
 
     # 1) Colab
@@ -176,7 +186,6 @@ def get_or_create_worksheet(gc, sheet_id, tab_name):
     return sh, ws
 
 def ensure_columns(base_header, must_have):
-    """Devuelve header con todas las columnas de must_have agregadas al final si faltan."""
     header = list(base_header)
     for c in must_have:
         if c not in header:
@@ -184,12 +193,6 @@ def ensure_columns(base_header, must_have):
     return header
 
 def apply_preferred_order(df: pd.DataFrame, header: list) -> list:
-    """
-    Header final:
-    - Primero columnas en PREFERRED_ORDER que existan
-    - Luego el resto (sin duplicar)
-    - Luego cualquier columna extra del DF
-    """
     pref = [c for c in PREFERRED_ORDER if c in df.columns]
     rest = [c for c in header if c in df.columns and c not in pref]
     final_header = pref + rest
@@ -200,6 +203,33 @@ def apply_preferred_order(df: pd.DataFrame, header: list) -> list:
 
 def df_to_rows(df, header):
     return df.reindex(columns=header, fill_value="").astype(str).values.tolist()
+
+def clear_monthly_fields_if_not_current_month(df_bucket: pd.DataFrame, tz: str = TZ) -> pd.DataFrame:
+    """
+    Si 'Fecha Actualizacion' no pertenece al mes en curso, vacía MONTHLY_CLEAR_COLS en esas filas.
+    No borra filas ni columnas: solo setea "".
+    """
+    if df_bucket.empty:
+        return df_bucket
+    if "Fecha Actualizacion" not in df_bucket.columns:
+        return df_bucket
+
+    # asegurar columnas existen
+    for c in MONTHLY_CLEAR_COLS:
+        if c not in df_bucket.columns:
+            df_bucket[c] = ""
+
+    now = pd.Timestamp.now(tz=tz)
+    cur_y, cur_m = now.year, now.month
+
+    dt = _parse_date_series(df_bucket["Fecha Actualizacion"])
+    mask_old = dt.notna() & ~((dt.dt.year == cur_y) & (dt.dt.month == cur_m))
+
+    if mask_old.any():
+        for c in MONTHLY_CLEAR_COLS:
+            df_bucket.loc[mask_old, c] = ""
+
+    return df_bucket
 
 # =========================================================
 # MAIN
@@ -218,6 +248,8 @@ def main():
         if c not in df.columns:
             raise RuntimeError(f"Falta columna {c} en Funnel")
 
+    has_ce = COL_CE in df.columns
+
     df[COL_REF] = df[COL_REF].astype(str).str.strip()
     df[COL_NEGOCIADOR] = df[COL_NEGOCIADOR].astype(str).str.strip()
     df[COL_BUCKET] = pd.to_numeric(df[COL_BUCKET], errors="coerce")
@@ -228,8 +260,6 @@ def main():
 
     # =========================================================
     # ACTIVIDAD DEL DÍA (para ejecutar flujo) vs CUPOS (regla nueva)
-    # - df_today: SOLO HOY (mantiene bucket_actual_max y regla de ejecución)
-    # - df_quota: HOY + (AYER solo EFECTIVA & LIQUIDADO) para calcular quotas
     # =========================================================
     now = pd.Timestamp.now(tz=TZ)
     today = now.date()
@@ -240,20 +270,16 @@ def main():
         print("Hoy no hay actividad")
         return
 
-    # Dataset especial para cupos:
-    # - HOY completo
-    # - AYER solo EFECTIVA + LIQUIDADO
     df_yesterday = df[df["_inserted_dt"].dt.date == yesterday].copy()
     if not df_yesterday.empty:
         tipo_y = df_yesterday[COL_TIPO_ACT].astype(str).str.upper().str.strip()
         status_y = df_yesterday[COL_STATUS].astype(str).str.upper().str.strip()
         df_yesterday_special = df_yesterday[tipo_y.eq("EFECTIVA") & status_y.eq("LIQUIDADO")].copy()
     else:
-        df_yesterday_special = df_yesterday  # vacío
+        df_yesterday_special = df_yesterday
 
     df_quota = pd.concat([df_today, df_yesterday_special], ignore_index=True)
 
-    # ------------------ Cupos ponderados ------------------
     tipo_q = df_quota[COL_TIPO_ACT].astype(str).str.upper().str.strip()
     status_q = df_quota[COL_STATUS].astype(str).str.upper().str.strip()
 
@@ -261,20 +287,14 @@ def main():
     df_quota.loc[tipo_q.eq("EFECTIVA"), "_peso"] = 4
     df_quota.loc[tipo_q.eq("EFECTIVA") & status_q.eq("LIQUIDADO"), "_peso"] = 6
 
-    quotas = (
-        df_quota.groupby(COL_NEGOCIADOR)["_peso"]
-        .sum().astype(int).to_dict()
-    )
+    quotas = df_quota.groupby(COL_NEGOCIADOR)["_peso"].sum().astype(int).to_dict()
 
-    # bucket_actual_max se mantiene SOLO con HOY (como venía)
     bucket_actual_max = int(df_today[COL_BUCKET].max())
 
     # ------------------ Bucket sheet ------------------
     sh_b, ws_b = get_or_create_worksheet(gc, BUCKET_SHEET_ID, BUCKET_TAB_NAME)
     values = ws_b.get_all_values()
 
-    # Columnas del funnel (pero renombradas a como quieres en Bucket)
-    # -> EXCLUYE columnas prohibidas
     funnel_cols = [
         c for c in df.columns.tolist()
         if c != "_inserted_dt" and c not in EXCLUDE_COLS_BUCKET
@@ -286,7 +306,6 @@ def main():
         if FUNNEL_TO_BUCKET_RENAME.get(c, c) not in EXCLUDE_COLS_BUCKET
     ]
 
-    # Header deseado: lo que venga del funnel (con rename) + Nuevo
     desired_header = ensure_columns(funnel_cols_bucket_names, [COL_NUEVO])
     desired_header = _filter_header_excluded(desired_header)
 
@@ -322,7 +341,7 @@ def main():
             ws_b.update("A1", [header])
 
     # =========================================================
-    # LIMPIEZA POR CAMBIO DE BUCKET
+    # LIMPIEZA POR CAMBIO DE BUCKET (SE MANTIENE)
     # =========================================================
     removed_refs = set()
 
@@ -358,7 +377,6 @@ def main():
             if COL_NUEVO in df_bucket.columns:
                 df_bucket[COL_NUEVO] = ""
 
-            # Asegurar exclusión antes de escribir
             df_bucket = _drop_excluded(df_bucket)
             header = _filter_header_excluded(header)
 
@@ -421,6 +439,9 @@ def main():
                         df_bucket.loc[mask, c] = str(new_val)
                         updates_in_bucket += int(mask.sum())
 
+            # ✅ regla mensual antes de escribir
+            df_bucket = clear_monthly_fields_if_not_current_month(df_bucket, tz=TZ)
+
             if updates_in_bucket > 0:
                 if COL_NUEVO in df_bucket.columns:
                     df_bucket[COL_NUEVO] = ""
@@ -431,6 +452,10 @@ def main():
 
                 ws_b.update("A1", [header])
                 ws_b.update("A2", df_to_rows(df_bucket, header), value_input_option="USER_ENTERED")
+        else:
+            # Aunque no haya updates, igual aplicamos regla mensual para limpiar data vieja
+            df_bucket = clear_monthly_fields_if_not_current_month(df_bucket, tz=TZ)
+            ws_b.update("A1", [apply_preferred_order(df_bucket, header)])
 
     # ------------------ limpiar "Nuevo" (seguro) ------------------
     if not df_bucket.empty and COL_NUEVO in df_bucket.columns:
@@ -501,6 +526,9 @@ def main():
     df_out.rename(columns=FUNNEL_TO_BUCKET_RENAME, inplace=True)
     df_out = _drop_excluded(df_out)
 
+    # ✅ regla mensual también para lo que se inserta
+    df_out = clear_monthly_fields_if_not_current_month(df_out, tz=TZ)
+
     header = ensure_columns(header, df_out.columns.tolist())
     header = _filter_header_excluded(header)
 
@@ -511,7 +539,6 @@ def main():
     header = _filter_header_excluded(header)
 
     ws_b.update("A1", [header])
-
     ws_b.append_rows(df_to_rows(df_out, header), value_input_option="USER_ENTERED")
 
     print(
@@ -519,7 +546,8 @@ def main():
         f"Refs removidas por cambio de bucket: {len(removed_refs)} | "
         f"Actualizaciones en Bucket (celdas/fila tocadas aprox): {updates_in_bucket} | "
         f"Referencias asignadas: {len(set(chosen_refs))} | "
-        f"Filas insertadas: {len(df_out)}"
+        f"Filas insertadas: {len(df_out)} | "
+        f"CE en Funnel: {'SI' if has_ce else 'NO'}"
     )
 
 if __name__ == "__main__":
