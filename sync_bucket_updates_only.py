@@ -39,7 +39,7 @@ COL_DESCUENTO_BUCKET = "Descuento Requerido"
 
 # 🔧 Si tu Bucket históricamente quedó guardado como UTC "oculto" (sin Z),
 # ponlo True para corregir histórico. Cuando ya quede bien, lo pones False.
-ASSUME_BUCKET_DATES_ARE_UTC = True
+ASSUME_BUCKET_DATES_ARE_UTC = False
 
 FUNNEL_TO_BUCKET_RENAME = {
     "BANCOS_ESTANDAR": "Banco",
