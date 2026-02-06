@@ -11,6 +11,17 @@
 #      Categoria Actualizacion, Pago a Banco actualizacion, Observación, Tipo de Actividad
 # - Mantiene el orden del header (PREFERRED_ORDER)
 # - Regla mensual: si Fecha Actualizacion no es del mes actual, vacía esas 7 columnas
+#
+# AJUSTE ZONA HORARIA (BUCKET EN HORA COLOMBIA):
+# - Funnel puede venir en UTC (ej: ...Z, +00:00 o naive pero realmente UTC)
+# - Bucket debe quedar SIEMPRE en hora Colombia (America/Bogota) para "Fecha Actualizacion"
+# - Para evitar “updates falsos”, comparamos "Fecha Actualizacion" ya normalizada a Bogota
+#
+# IMPORTANTE:
+# - Si HOY tu Bucket está guardando horas como UTC pero sin Z (ej: 16:43 cuando era 11:43),
+#   deja ASSUME_BUCKET_DATES_ARE_UTC = True para corregir histórico.
+# - Cuando confirmes que TODO quedó bien (ya ves horas correctas en Bucket),
+#   cambia ASSUME_BUCKET_DATES_ARE_UTC = False para no volver a correr 5 horas fechas ya locales.
 # ---------------------------------------------------------
 
 import os
@@ -33,6 +44,9 @@ COL_CE = "CE"
 COL_DESCUENTO_FUNNEL = "Descuento"
 COL_DESCUENTO_BUCKET = "Descuento Requerido"
 
+# 🔧 Control de corrección histórica (lee explicación arriba)
+ASSUME_BUCKET_DATES_ARE_UTC = True
+
 FUNNEL_TO_BUCKET_RENAME = {
     "BANCOS_ESTANDAR": "Banco",
     "Descuento": "Descuento Requerido",
@@ -43,7 +57,6 @@ FUNNEL_TO_BUCKET_RENAME = {
     "observations_ultima": "Observación",
 }
 
-# Orden actual exacto
 PREFERRED_ORDER = [
     "Referencia",
     "Id deuda",
@@ -90,7 +103,6 @@ MONTHLY_CLEAR_COLS = [
     "Tipo de Actividad",
 ]
 
-# Columnas de Funnel que alimentan esas 7 (ojo: algunas se renombran)
 UPDATE_COLS_FUNNEL = [
     "Descuento_Actualizacion",
     "inserted_at_ultima",
@@ -113,6 +125,49 @@ def _parse_date_series(x: pd.Series) -> pd.Series:
 def _is_blank_series(s: pd.Series) -> pd.Series:
     s2 = s.astype(str).str.strip()
     return s.isna() | s2.eq("") | s2.str.lower().isin(["nan", "none", "nat"])
+
+def to_bogota_str(x: pd.Series, tz_local: str = TZ, assume_naive_is_utc: bool = True) -> pd.Series:
+    """
+    Convierte timestamps a string en hora Colombia.
+
+    - Si detecta Z/+00:00/UTC => se interpreta como UTC y se convierte a Bogota.
+    - Si NO detecta zona:
+        - assume_naive_is_utc=True  => se asume UTC (corrige casos tipo 16:43 -> 11:43)
+        - assume_naive_is_utc=False => se asume que ya es hora local (solo formatea)
+    """
+    s = x.astype(str).str.strip()
+    s = s.str.replace("T", " ", regex=False)
+
+    # detectar señales de UTC
+    is_utc_hint = s.str.contains(r"(Z$|\+00:00|\+0000|UTC)", case=False, regex=True)
+
+    out = pd.Series([""] * len(s), index=s.index, dtype="object")
+
+    # 1) Con hint UTC -> parse como UTC y convertir
+    if is_utc_hint.any():
+        dt_utc = pd.to_datetime(s[is_utc_hint], errors="coerce", utc=True)
+        dt_local = dt_utc.dt.tz_convert(tz_local)
+        out.loc[is_utc_hint] = dt_local.dt.strftime("%Y-%m-%d %H:%M:%S").where(dt_local.notna(), "")
+
+    # 2) Sin hint UTC
+    if (~is_utc_hint).any():
+        dt_naive = pd.to_datetime(s[~is_utc_hint], errors="coerce")
+
+        if assume_naive_is_utc:
+            # Asumimos que lo naive realmente es UTC (tu caso actual)
+            try:
+                dt_utc2 = dt_naive.dt.tz_localize("UTC", nonexistent="NaT", ambiguous="NaT")
+                dt_local2 = dt_utc2.dt.tz_convert(tz_local)
+                out.loc[~is_utc_hint] = dt_local2.dt.strftime("%Y-%m-%d %H:%M:%S").where(dt_local2.notna(), "")
+            except Exception:
+                out.loc[~is_utc_hint] = dt_naive.dt.strftime("%Y-%m-%d %H:%M:%S").where(dt_naive.notna(), "")
+        else:
+            # Asumimos que ya es hora local (solo formatear)
+            out.loc[~is_utc_hint] = dt_naive.dt.strftime("%Y-%m-%d %H:%M:%S").where(dt_naive.notna(), "")
+
+    # blanks
+    out = out.where(~_is_blank_series(s), "")
+    return out
 
 def clear_monthly_fields_if_not_current_month(df_bucket: pd.DataFrame, tz: str = TZ) -> pd.DataFrame:
     if df_bucket.empty or "Fecha Actualizacion" not in df_bucket.columns:
@@ -167,13 +222,6 @@ def read_worksheet_as_df(gc, sheet_id, tab_name):
     df.columns = [_norm_col(c) for c in df.columns]
     return df, ws, header
 
-def ensure_columns(header, must_have):
-    header = list(header)
-    for c in must_have:
-        if c not in header:
-            header.append(c)
-    return header
-
 def apply_preferred_order(df: pd.DataFrame, header: list) -> list:
     pref = [c for c in PREFERRED_ORDER if c in df.columns]
     rest = [c for c in header if c in df.columns and c not in pref]
@@ -223,7 +271,6 @@ def main():
     cols_needed = [COL_REF, COL_DESCUENTO_FUNNEL] + UPDATE_COLS_FUNNEL
     if has_ce:
         cols_needed.append(COL_CE)
-
     cols_needed = [c for c in cols_needed if c in df_funnel.columns]
 
     df_latest = (
@@ -236,7 +283,15 @@ def main():
     # Renombrar a nombres Bucket
     df_latest.rename(columns=FUNNEL_TO_BUCKET_RENAME, inplace=True)
 
-    # Normalizar a string
+    # Normalizar "Fecha Actualizacion" a hora Colombia EN LO NUEVO (asumimos naive como UTC aquí)
+    if "Fecha Actualizacion" in df_latest.columns:
+        df_latest["Fecha Actualizacion"] = to_bogota_str(
+            df_latest["Fecha Actualizacion"],
+            tz_local=TZ,
+            assume_naive_is_utc=True
+        )
+
+    # Normalizar a string (resto)
     for c in df_latest.columns:
         if c != COL_REF:
             df_latest[c] = df_latest[c].astype(str)
@@ -251,6 +306,16 @@ def main():
         raise RuntimeError(f"Falta columna '{COL_REF}' en Bucket")
 
     df_bucket[COL_REF] = df_bucket[COL_REF].astype(str).str.strip()
+
+    # Normalizar Fecha Actualizacion existente en Bucket a hora Colombia
+    # - Si tu bucket venía en UTC "oculto", usa ASSUME_BUCKET_DATES_ARE_UTC=True para corregir histórico.
+    # - Luego cambia a False para no volver a desplazar horas correctas.
+    if "Fecha Actualizacion" in df_bucket.columns:
+        df_bucket["Fecha Actualizacion"] = to_bogota_str(
+            df_bucket["Fecha Actualizacion"],
+            tz_local=TZ,
+            assume_naive_is_utc=ASSUME_BUCKET_DATES_ARE_UTC
+        )
 
     # asegurar columnas objetivo existan en Bucket (solo para poder escribir)
     cols_target_bucket = [
@@ -288,9 +353,25 @@ def main():
         old = df_merged[col]
         new = df_merged[col_new]
 
-        # solo si Funnel trae algo válido (no vacío/nan)
+        # ✅ Caso especial: Fecha Actualizacion
+        if col == "Fecha Actualizacion":
+            # Old: lo tratamos con el mismo criterio del bucket (para no “bailar”)
+            old_cmp = to_bogota_str(old, tz_local=TZ, assume_naive_is_utc=ASSUME_BUCKET_DATES_ARE_UTC)
+            # New: lo tratamos como UTC->Bogota (Funnel)
+            new_cmp = to_bogota_str(new, tz_local=TZ, assume_naive_is_utc=True)
+
+            mask_has_new = ~_is_blank_series(new_cmp)
+            mask_diff = mask_has_new & (old_cmp.astype(str).ne(new_cmp.astype(str)))
+
+            if mask_diff.any():
+                df_merged.loc[mask_diff, col] = new_cmp[mask_diff]
+                updated_cells += int(mask_diff.sum())
+
+            df_merged.drop(columns=[col_new], inplace=True)
+            continue
+
+        # --- resto igual ---
         mask_has_new = ~_is_blank_series(new)
-        # actualiza si bucket está vacío o distinto
         mask_diff = mask_has_new & (old.astype(str).ne(new.astype(str)))
 
         if mask_diff.any():
@@ -299,15 +380,24 @@ def main():
 
         df_merged.drop(columns=[col_new], inplace=True)
 
+    # Asegurar que la columna final quede consistente en Bogota
+    if "Fecha Actualizacion" in df_merged.columns:
+        df_merged["Fecha Actualizacion"] = to_bogota_str(
+            df_merged["Fecha Actualizacion"],
+            tz_local=TZ,
+            assume_naive_is_utc=ASSUME_BUCKET_DATES_ARE_UTC
+        )
+
     # -------- Regla mensual --------
     df_merged = clear_monthly_fields_if_not_current_month(df_merged, tz=TZ)
 
-    # -------- Escribir SOLO las columnas target (incluyendo las 7 + descuento + CE) --------
+    # -------- Escribir SOLO las columnas target --------
     update_only_columns(ws_bucket, df_merged, bucket_header, cols_target_bucket)
 
     print(
         f"OK | Celdas actualizadas (aprox): {updated_cells} | "
-        f"Cols tocadas: {len(cols_target_bucket)} | CE en Funnel: {'SI' if has_ce else 'NO'}"
+        f"Cols tocadas: {len(cols_target_bucket)} | CE en Funnel: {'SI' if has_ce else 'NO'} | "
+        f"ASSUME_BUCKET_DATES_ARE_UTC: {ASSUME_BUCKET_DATES_ARE_UTC}"
     )
 
 if __name__ == "__main__":
