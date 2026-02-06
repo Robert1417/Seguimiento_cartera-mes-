@@ -12,10 +12,9 @@
 # - Mantiene el orden del header (PREFERRED_ORDER)
 # - Regla mensual: si Fecha Actualizacion no es del mes actual, vacía esas 7 columnas
 #
-# AJUSTE ZONA HORARIA (CORREGIDO - SIN DOBLE CONVERSIÓN):
-# - Funnel viene en UTC (ej: 15:26) y Bucket debe quedar en hora Colombia (10:26).
-# - Corregimos histórico de Bucket UNA VEZ (si estaba en UTC "oculto").
-# - NO volvemos a convertir después (para no restar 5 horas dos veces).
+# FIX ZONA HORARIA (SIN DOBLE CONVERSIÓN):
+# - NO convertimos df_latest["Fecha Actualizacion"] antes del merge.
+# - Convertimos SOLO UNA VEZ al momento de actualizar Bucket.
 # ---------------------------------------------------------
 
 import os
@@ -38,10 +37,8 @@ COL_CE = "CE"
 COL_DESCUENTO_FUNNEL = "Descuento"
 COL_DESCUENTO_BUCKET = "Descuento Requerido"
 
-# 🔧 IMPORTANTE:
-# - Si tu Bucket hoy está guardando UTC sin "Z" (ej: 16:43 cuando era 11:43),
-#   deja esto en True para corregir histórico.
-# - Cuando confirmes que ya todo quedó en hora Colombia, ponlo en False.
+# 🔧 Si tu Bucket históricamente quedó guardado como UTC "oculto" (sin Z),
+# ponlo True para corregir histórico. Cuando ya quede bien, lo pones False.
 ASSUME_BUCKET_DATES_ARE_UTC = True
 
 FUNNEL_TO_BUCKET_RENAME = {
@@ -125,38 +122,45 @@ def _is_blank_series(s: pd.Series) -> pd.Series:
 
 def to_bogota_str(x: pd.Series, tz_local: str = TZ, assume_naive_is_utc: bool = True) -> pd.Series:
     """
-    Convierte timestamps a string en hora Colombia.
-    - Si trae Z/+00/UTC -> se interpreta como UTC.
+    Convierte una serie de fechas a string en hora Colombia.
+
+    - Si trae Z/+00/UTC => se interpreta como UTC.
     - Si NO trae zona:
-        * assume_naive_is_utc=True  => se asume UTC (útil para corregir histórico en Bucket)
-        * assume_naive_is_utc=False => se asume ya es hora Colombia (solo formatea)
+        * assume_naive_is_utc=True  => se asume UTC y se convierte a Bogota
+        * assume_naive_is_utc=False => se asume ya local (solo formatea)
     """
     s = x.astype(str).str.strip()
     s = s.str.replace("T", " ", regex=False)
 
-    is_utc_hint = s.str.contains(r"(Z$|\+00:00|\+0000|UTC)", case=False, regex=True)
+    # blanks -> ""
+    blank = _is_blank_series(s)
     out = pd.Series([""] * len(s), index=s.index, dtype="object")
+    if blank.all():
+        return out
 
-    # 1) Filas con hint UTC
+    # Detectar hints claros de UTC
+    is_utc_hint = s.str.contains(r"(Z$|\+00:00|\+0000|UTC)", case=False, regex=True)
+
+    # 1) Con hint UTC: parse UTC y convertir
     if is_utc_hint.any():
         dt_utc = pd.to_datetime(s[is_utc_hint], errors="coerce", utc=True)
         dt_local = dt_utc.dt.tz_convert(tz_local)
         out.loc[is_utc_hint] = dt_local.dt.strftime("%Y-%m-%d %H:%M:%S").where(dt_local.notna(), "")
 
-    # 2) Filas sin hint UTC
+    # 2) Sin hint UTC
     if (~is_utc_hint).any():
         dt_naive = pd.to_datetime(s[~is_utc_hint], errors="coerce")
 
         if assume_naive_is_utc:
-            # asumir UTC y convertir a Bogota
+            # tratar como UTC y convertir
             dt_utc2 = dt_naive.dt.tz_localize("UTC", nonexistent="NaT", ambiguous="NaT")
             dt_local2 = dt_utc2.dt.tz_convert(tz_local)
             out.loc[~is_utc_hint] = dt_local2.dt.strftime("%Y-%m-%d %H:%M:%S").where(dt_local2.notna(), "")
         else:
-            # asumir ya local (solo formatear)
+            # tratar como ya local (solo formatear)
             out.loc[~is_utc_hint] = dt_naive.dt.strftime("%Y-%m-%d %H:%M:%S").where(dt_naive.notna(), "")
 
-    out = out.where(~_is_blank_series(s), "")
+    out = out.where(~blank, "")
     return out
 
 def clear_monthly_fields_if_not_current_month(df_bucket: pd.DataFrame, tz: str = TZ) -> pd.DataFrame:
@@ -170,7 +174,6 @@ def clear_monthly_fields_if_not_current_month(df_bucket: pd.DataFrame, tz: str =
     now = pd.Timestamp.now(tz=tz)
     cur_y, cur_m = now.year, now.month
 
-    # Ya está en hora Colombia (string YYYY-MM-DD HH:MM:SS)
     dt = _parse_date_series(df_bucket["Fecha Actualizacion"])
     mask_old = dt.notna() & ~((dt.dt.year == cur_y) & (dt.dt.month == cur_m))
 
@@ -273,13 +276,8 @@ def main():
     # Renombrar a nombres Bucket
     df_latest.rename(columns=FUNNEL_TO_BUCKET_RENAME, inplace=True)
 
-    # Convertir lo nuevo (Funnel) a hora Colombia (asumimos UTC si viene naive)
-    if "Fecha Actualizacion" in df_latest.columns:
-        df_latest["Fecha Actualizacion"] = to_bogota_str(
-            df_latest["Fecha Actualizacion"],
-            tz_local=TZ,
-            assume_naive_is_utc=True
-        )
+    # ✅ CLAVE: NO convertir aquí "Fecha Actualizacion".
+    # Dejamos el valor del Funnel como viene (normalmente UTC) para convertir UNA sola vez en el merge.
 
     # Normalizar a string (resto)
     for c in df_latest.columns:
@@ -297,7 +295,7 @@ def main():
 
     df_bucket[COL_REF] = df_bucket[COL_REF].astype(str).str.strip()
 
-    # Corregir histórico del Bucket UNA VEZ (si venía en UTC oculto)
+    # Corregir histórico Bucket (si venía UTC oculto) -> lo dejamos ya en Colombia
     if "Fecha Actualizacion" in df_bucket.columns:
         df_bucket["Fecha Actualizacion"] = to_bogota_str(
             df_bucket["Fecha Actualizacion"],
@@ -324,7 +322,7 @@ def main():
         if c not in bucket_header:
             bucket_header.append(c)
 
-    # Reordenar header
+    # Reordenar header (presentación)
     bucket_header = apply_preferred_order(df_bucket, bucket_header)
     ws_bucket.update("A1", [bucket_header])
 
@@ -341,10 +339,12 @@ def main():
         new = df_merged[col_new]
 
         # ✅ Caso especial: Fecha Actualizacion
-        # Old YA está en hora Colombia (por corrección previa) -> NO volver a convertir
         if col == "Fecha Actualizacion":
-            old_cmp = to_bogota_str(old, tz_local=TZ, assume_naive_is_utc=False)  # <-- clave
-            new_cmp = to_bogota_str(new, tz_local=TZ, assume_naive_is_utc=True)   # Funnel UTC->CO
+            # old ya está en Colombia -> solo formatear (NO convertir)
+            old_cmp = to_bogota_str(old, tz_local=TZ, assume_naive_is_utc=False)
+
+            # new viene del Funnel (UTC, a veces sin Z) -> convertir a Colombia UNA sola vez
+            new_cmp = to_bogota_str(new, tz_local=TZ, assume_naive_is_utc=True)
 
             mask_has_new = ~_is_blank_series(new_cmp)
             mask_diff = mask_has_new & (old_cmp.astype(str).ne(new_cmp.astype(str)))
@@ -366,8 +366,7 @@ def main():
 
         df_merged.drop(columns=[col_new], inplace=True)
 
-    # ✅ IMPORTANTE: NO reconvertir aquí.
-    # Solo aseguramos FORMATO (asumimos ya local)
+    # Formato final (ya en Colombia; NO convertir otra vez)
     if "Fecha Actualizacion" in df_merged.columns:
         df_merged["Fecha Actualizacion"] = to_bogota_str(
             df_merged["Fecha Actualizacion"],
