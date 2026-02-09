@@ -4,7 +4,9 @@ on:
   workflow_dispatch:
   schedule:
     # LUN–VIE (COL 8:00–17:00) cada hora (UTC 13–22)
-    - cron: "0 13-22 * * 1-5"
+    - cron: "15,55 13-23/2 * * 1-5"
+  # 9:35/11:35/1:35/3:35/5:35 => UTC: 14:35/16:35/18:35/20:35/22:35 (horas pares)
+    - cron: "35 14-22/2 * * 1-5"
     # SÁBADO (COL 9:00–14:00) cada hora (UTC 14–19)
     - cron: "0 14-19 * * 6"
 
