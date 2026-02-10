@@ -43,11 +43,28 @@ UPDATE_COLS_FUNNEL = [
 
 # =========================================================
 # COLUMNAS QUE NO SE DEBEN SUBIR/SINCRONIZAR A BUCKET
+# (se filtran case-insensitive para evitar "Ultimo contacto" vs "ultimo contacto")
 # =========================================================
 EXCLUDE_COLS_BUCKET = [
     "tipo_fila",
     "Negociador liquidacion",
     "Por?",
+
+    # 👇 columnas “basura” que no quieres que aparezcan en Bucket
+    "MORAEstructurable",
+    "Ahorro medio",
+    "Estado Deuda",
+    "sub_estado_deuda",
+    "estado_reparadora",
+    "sub_estado_reparadora",
+    "Priority_level",
+    "Ultimo contacto",
+    "ultimo contacto",
+    "fecha mensaje",
+    "Ingreso_funnel",
+    "tiene_obs",
+    "es_este_mes",
+    "tiene_liquidado_historico",
 ]
 
 # =========================================================
@@ -94,6 +111,7 @@ PREFERRED_ORDER = [
     "Tipo de Actividad",
     "Mora_estructurado",
     "MORA_CREDITO",
+    # OJO: si algún día la vuelves a querer, quítala de EXCLUDE_COLS_BUCKET
     "ultimo contacto",
     "Bucket",
     "Nuevo",
@@ -121,6 +139,9 @@ MONTHLY_CLEAR_COLS = [
 def _norm_col(s):
     return str(s).strip()
 
+def _norm_key(s):
+    return str(s).strip().lower()
+
 def _parse_date_series(x):
     dt = pd.to_datetime(x, errors="coerce")
     if dt.isna().mean() > 0.90:
@@ -131,13 +152,15 @@ def _parse_date_series(x):
     return dt
 
 def _drop_excluded(df: pd.DataFrame) -> pd.DataFrame:
-    cols = [c for c in EXCLUDE_COLS_BUCKET if c in df.columns]
-    if cols:
-        df = df.drop(columns=cols, errors="ignore")
+    excl = {_norm_key(c) for c in EXCLUDE_COLS_BUCKET}
+    cols_to_drop = [c for c in df.columns if _norm_key(c) in excl]
+    if cols_to_drop:
+        df = df.drop(columns=cols_to_drop, errors="ignore")
     return df
 
 def _filter_header_excluded(header: list) -> list:
-    return [c for c in header if c not in EXCLUDE_COLS_BUCKET]
+    excl = {_norm_key(c) for c in EXCLUDE_COLS_BUCKET}
+    return [c for c in header if _norm_key(c) not in excl]
 
 def get_gspread_client():
     mi_json = None
@@ -297,13 +320,13 @@ def main():
 
     funnel_cols = [
         c for c in df.columns.tolist()
-        if c != "_inserted_dt" and c not in EXCLUDE_COLS_BUCKET
+        if c != "_inserted_dt" and _norm_key(c) not in {_norm_key(x) for x in EXCLUDE_COLS_BUCKET}
     ]
 
     funnel_cols_bucket_names = [
         FUNNEL_TO_BUCKET_RENAME.get(c, c)
         for c in funnel_cols
-        if FUNNEL_TO_BUCKET_RENAME.get(c, c) not in EXCLUDE_COLS_BUCKET
+        if _norm_key(FUNNEL_TO_BUCKET_RENAME.get(c, c)) not in {_norm_key(x) for x in EXCLUDE_COLS_BUCKET}
     ]
 
     desired_header = ensure_columns(funnel_cols_bucket_names, [COL_NUEVO])
@@ -393,12 +416,12 @@ def main():
 
         update_cols_present_funnel = [
             c for c in UPDATE_COLS_FUNNEL
-            if c in df.columns and c not in EXCLUDE_COLS_BUCKET
+            if c in df.columns and _norm_key(c) not in {_norm_key(x) for x in EXCLUDE_COLS_BUCKET}
         ]
         update_cols_present_bucket = [
             FUNNEL_TO_BUCKET_RENAME.get(c, c)
             for c in update_cols_present_funnel
-            if FUNNEL_TO_BUCKET_RENAME.get(c, c) not in EXCLUDE_COLS_BUCKET
+            if _norm_key(FUNNEL_TO_BUCKET_RENAME.get(c, c)) not in {_norm_key(x) for x in EXCLUDE_COLS_BUCKET}
         ]
 
         if update_cols_present_funnel and existing_refs:
@@ -432,7 +455,7 @@ def main():
                     continue
                 mask = df_bucket[COL_REF].eq(ref)
                 for c, new_val in latest_map[ref].items():
-                    if c in EXCLUDE_COLS_BUCKET:
+                    if _norm_key(c) in {_norm_key(x) for x in EXCLUDE_COLS_BUCKET}:
                         continue
                     old_vals = df_bucket.loc[mask, c].astype(str)
                     if (old_vals != str(new_val)).any():
