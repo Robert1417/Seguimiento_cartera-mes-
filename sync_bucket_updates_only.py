@@ -20,6 +20,7 @@
 
 import os
 import json
+import numpy as np  # ✅ necesario para np.nan en _to_num_strict
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
@@ -131,52 +132,49 @@ def _to_num_strict(v: pd.Series) -> pd.Series:
     Convierte strings tipo:
       "100.000", "100,000", "100000", "100000,5" -> float
     Si no se puede, NaN.
+
+    ✅ FIX: NO usar pd.NA dentro de Series dtype float64 (revienta). Usamos np.nan.
     """
     s = v.astype(str).str.strip()
     s = s.where(~_is_blank_series(s), pd.NA)
 
-    # quitar separadores de miles comunes
     s2 = s.astype("string")
 
-    # Caso 1: si tiene coma y punto, asumimos que el separador decimal es el ÚLTIMO símbolo
-    # y removemos el otro como miles.
     has_comma = s2.str.contains(",", regex=False)
     has_dot = s2.str.contains(".", regex=False)
 
-    out = pd.Series([pd.NA] * len(s2), index=s2.index, dtype="float64")
+    # ✅ antes: pd.Series([pd.NA]*..., dtype="float64") -> TypeError
+    out = pd.Series(np.nan, index=s2.index, dtype="float64")
 
     mask_both = has_comma & has_dot
     if mask_both.any():
         tmp = s2[mask_both]
-
-        # Si el último símbolo es coma => decimal coma: quitar puntos, cambiar coma por punto
         last_is_comma = tmp.str.rfind(",") > tmp.str.rfind(".")
-        tmp1 = tmp.where(~last_is_comma, tmp.str.replace(".", "", regex=False).str.replace(",", ".", regex=False))
-        # Si el último símbolo es punto => decimal punto: quitar comas
-        tmp1 = tmp1.where(last_is_comma, tmp.str.replace(",", "", regex=False))
-
+        tmp1 = tmp.where(
+            ~last_is_comma,
+            tmp.str.replace(".", "", regex=False).str.replace(",", ".", regex=False)
+        )
+        tmp1 = tmp1.where(
+            last_is_comma,
+            tmp.str.replace(",", "", regex=False)
+        )
         out.loc[mask_both] = pd.to_numeric(tmp1, errors="coerce")
 
-    # Caso 2: solo coma -> puede ser decimal coma o miles coma
     mask_only_comma = has_comma & ~has_dot
     if mask_only_comma.any():
         tmp = s2[mask_only_comma]
-        # si hay más de 1 coma, asumimos miles -> quitarlas
         many_commas = tmp.str.count(",") > 1
-        tmp1 = tmp.where(many_commas, tmp.str.replace(",", ".", regex=False))   # una coma -> decimal
-        tmp1 = tmp1.where(~many_commas, tmp.str.replace(",", "", regex=False))  # muchas comas -> miles
+        tmp1 = tmp.where(many_commas, tmp.str.replace(",", ".", regex=False))
+        tmp1 = tmp1.where(~many_commas, tmp.str.replace(",", "", regex=False))
         out.loc[mask_only_comma] = pd.to_numeric(tmp1, errors="coerce")
 
-    # Caso 3: solo punto -> podría ser decimal punto o miles punto (LATAM)
     mask_only_dot = has_dot & ~has_comma
     if mask_only_dot.any():
         tmp = s2[mask_only_dot]
-        # si hay más de 1 punto, asumimos miles -> quitarlos
         many_dots = tmp.str.count(r"\.") > 1
-        tmp1 = tmp.where(many_dots, tmp.str.replace(".", "", regex=False))  # muchas -> miles
+        tmp1 = tmp.where(many_dots, tmp.str.replace(".", "", regex=False))
         out.loc[mask_only_dot] = pd.to_numeric(tmp1, errors="coerce")
 
-    # Caso 4: sin coma ni punto
     mask_plain = ~has_comma & ~has_dot
     if mask_plain.any():
         out.loc[mask_plain] = pd.to_numeric(s2[mask_plain], errors="coerce")
@@ -192,7 +190,8 @@ def to_bogota_str(x: pd.Series, tz_local: str = TZ, assume_naive_is_utc: bool = 
     if blank.all():
         return out
 
-    is_utc_hint = s.str.contains(r"(Z$|\+00:00|\+0000|UTC)", case=False, regex=True)
+    # ✅ quitar warning regex: usar non-capturing group (?:...)
+    is_utc_hint = s.str.contains(r"(?:Z$|\+00:00|\+0000|UTC)", case=False, regex=True)
 
     if is_utc_hint.any():
         dt_utc = pd.to_datetime(s[is_utc_hint], errors="coerce", utc=True)
@@ -282,9 +281,11 @@ def update_only_columns(ws, df_final: pd.DataFrame, header: list, cols_to_write:
         start_cell = gspread.utils.rowcol_to_a1(2, col_idx_1based)
         end_cell = gspread.utils.rowcol_to_a1(n + 1, col_idx_1based)
         rng = f"{start_cell}:{end_cell}"
+
+        # ✅ evitar warning deprecación: values primero o argumentos nombrados
         ws.update(
-            rng,
-            [[v] for v in df_final[col_name].astype(str).tolist()],
+            range_name=rng,
+            values=[[v] for v in df_final[col_name].astype(str).tolist()],
             value_input_option="USER_ENTERED"
         )
 
@@ -297,7 +298,6 @@ def main():
         print("Funnel vacío.")
         return
 
-    # requisitos mínimos
     for c in [COL_REF, COL_INSERTED_AT, COL_DESCUENTO_FUNNEL]:
         if c not in df_funnel.columns:
             raise RuntimeError(f"Falta columna '{c}' en Funnel")
@@ -306,14 +306,13 @@ def main():
     df_funnel["_inserted_dt"] = _parse_date_series(df_funnel[COL_INSERTED_AT])
 
     has_ce = COL_CE in df_funnel.columns
-    has_ahorro = COL_AHORRO_FUNNEL in df_funnel.columns  # ✅ NUEVO
+    has_ahorro = COL_AHORRO_FUNNEL in df_funnel.columns
 
     cols_needed = [COL_REF, COL_DESCUENTO_FUNNEL] + UPDATE_COLS_FUNNEL
     if has_ce:
         cols_needed.append(COL_CE)
     if has_ahorro:
         cols_needed.append(COL_AHORRO_FUNNEL)
-
     cols_needed = [c for c in cols_needed if c in df_funnel.columns]
 
     df_latest = (
@@ -323,7 +322,6 @@ def main():
                  .copy()
     )
 
-    # Renombrar a nombres Bucket
     df_latest.rename(columns=FUNNEL_TO_BUCKET_RENAME, inplace=True)
 
     # Normalizar a string (resto)
@@ -363,7 +361,7 @@ def main():
     if has_ce:
         cols_target_bucket.append("CE")
     if has_ahorro:
-        cols_target_bucket.append(COL_AHORRO_BUCKET)  # ✅ NUEVO
+        cols_target_bucket.append(COL_AHORRO_BUCKET)
 
     # asegurar columnas existen
     for c in cols_target_bucket:
@@ -374,7 +372,7 @@ def main():
 
     # Reordenar header (presentación)
     bucket_header = apply_preferred_order(df_bucket, bucket_header)
-    ws_bucket.update("A1", [bucket_header])
+    ws_bucket.update(range_name="A1", values=[bucket_header])  # ✅ sin warning
 
     # -------- Merge para actualizar SOLO columnas target --------
     df_merged = df_bucket.merge(df_latest, on=COL_REF, how="left", suffixes=("", "__new"))
@@ -409,13 +407,9 @@ def main():
             new_num = _to_num_strict(new)
 
             mask_has_new = new_num.notna()
-            # tolerancia pequeña por redondeo/formato
-            mask_diff = mask_has_new & (
-                old_num.isna() | ((old_num - new_num).abs() > 1e-6)
-            )
+            mask_diff = mask_has_new & (old_num.isna() | ((old_num - new_num).abs() > 1e-6))
 
             if mask_diff.any():
-                # escribimos el string del Funnel (tal cual viene)
                 df_merged.loc[mask_diff, col] = new.astype(str)[mask_diff]
                 updated_cells += int(mask_diff.sum())
 
