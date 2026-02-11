@@ -6,7 +6,8 @@
 # - SOLO actualiza (para Id deuda ya existentes en Bucket):
 #   1) Descuento Requerido (desde Funnel: Descuento)
 #   2) CE (si existe en Funnel)
-#   3) Estas columnas “de actualización” (último registro en Funnel por inserted_at_ultima):
+#   3) Ahorro total (solo si es distinto Funnel vs Bucket)
+#   4) Estas columnas “de actualización” (último registro en Funnel por inserted_at_ultima):
 #      Descuento_Actualizacion, Fecha Actualizacion, Actualizado Por,
 #      Categoria Actualizacion, Pago a Banco actualizacion, Observación, Tipo de Actividad
 # - Mantiene el orden del header (PREFERRED_ORDER)
@@ -37,6 +38,10 @@ COL_CE = "CE"
 COL_DESCUENTO_FUNNEL = "Descuento"
 COL_DESCUENTO_BUCKET = "Descuento Requerido"
 
+# ✅ NUEVO: Ahorro total
+COL_AHORRO_FUNNEL = "Ahorro total"
+COL_AHORRO_BUCKET = "Ahorro total"
+
 # 🔧 Si tu Bucket históricamente quedó guardado como UTC "oculto" (sin Z),
 # ponlo True para corregir histórico. Cuando ya quede bien, lo pones False.
 ASSUME_BUCKET_DATES_ARE_UTC = False
@@ -49,6 +54,7 @@ FUNNEL_TO_BUCKET_RENAME = {
     "CATEGORIA_PRED_ultima": "Categoria Actualizacion",
     "payment_to_bank_ultima": "Pago a Banco actualizacion",
     "observations_ultima": "Observación",
+    # Ahorro total se queda igual
 }
 
 PREFERRED_ORDER = [
@@ -120,44 +126,86 @@ def _is_blank_series(s: pd.Series) -> pd.Series:
     s2 = s.astype(str).str.strip()
     return s.isna() | s2.eq("") | s2.str.lower().isin(["nan", "none", "nat"])
 
-def to_bogota_str(x: pd.Series, tz_local: str = TZ, assume_naive_is_utc: bool = True) -> pd.Series:
+def _to_num_strict(v: pd.Series) -> pd.Series:
     """
-    Convierte una serie de fechas a string en hora Colombia.
+    Convierte strings tipo:
+      "100.000", "100,000", "100000", "100000,5" -> float
+    Si no se puede, NaN.
+    """
+    s = v.astype(str).str.strip()
+    s = s.where(~_is_blank_series(s), pd.NA)
 
-    - Si trae Z/+00/UTC => se interpreta como UTC.
-    - Si NO trae zona:
-        * assume_naive_is_utc=True  => se asume UTC y se convierte a Bogota
-        * assume_naive_is_utc=False => se asume ya local (solo formatea)
-    """
+    # quitar separadores de miles comunes
+    s2 = s.astype("string")
+
+    # Caso 1: si tiene coma y punto, asumimos que el separador decimal es el ÚLTIMO símbolo
+    # y removemos el otro como miles.
+    has_comma = s2.str.contains(",", regex=False)
+    has_dot = s2.str.contains(".", regex=False)
+
+    out = pd.Series([pd.NA] * len(s2), index=s2.index, dtype="float64")
+
+    mask_both = has_comma & has_dot
+    if mask_both.any():
+        tmp = s2[mask_both]
+
+        # Si el último símbolo es coma => decimal coma: quitar puntos, cambiar coma por punto
+        last_is_comma = tmp.str.rfind(",") > tmp.str.rfind(".")
+        tmp1 = tmp.where(~last_is_comma, tmp.str.replace(".", "", regex=False).str.replace(",", ".", regex=False))
+        # Si el último símbolo es punto => decimal punto: quitar comas
+        tmp1 = tmp1.where(last_is_comma, tmp.str.replace(",", "", regex=False))
+
+        out.loc[mask_both] = pd.to_numeric(tmp1, errors="coerce")
+
+    # Caso 2: solo coma -> puede ser decimal coma o miles coma
+    mask_only_comma = has_comma & ~has_dot
+    if mask_only_comma.any():
+        tmp = s2[mask_only_comma]
+        # si hay más de 1 coma, asumimos miles -> quitarlas
+        many_commas = tmp.str.count(",") > 1
+        tmp1 = tmp.where(many_commas, tmp.str.replace(",", ".", regex=False))   # una coma -> decimal
+        tmp1 = tmp1.where(~many_commas, tmp.str.replace(",", "", regex=False))  # muchas comas -> miles
+        out.loc[mask_only_comma] = pd.to_numeric(tmp1, errors="coerce")
+
+    # Caso 3: solo punto -> podría ser decimal punto o miles punto (LATAM)
+    mask_only_dot = has_dot & ~has_comma
+    if mask_only_dot.any():
+        tmp = s2[mask_only_dot]
+        # si hay más de 1 punto, asumimos miles -> quitarlos
+        many_dots = tmp.str.count(r"\.") > 1
+        tmp1 = tmp.where(many_dots, tmp.str.replace(".", "", regex=False))  # muchas -> miles
+        out.loc[mask_only_dot] = pd.to_numeric(tmp1, errors="coerce")
+
+    # Caso 4: sin coma ni punto
+    mask_plain = ~has_comma & ~has_dot
+    if mask_plain.any():
+        out.loc[mask_plain] = pd.to_numeric(s2[mask_plain], errors="coerce")
+
+    return out
+
+def to_bogota_str(x: pd.Series, tz_local: str = TZ, assume_naive_is_utc: bool = True) -> pd.Series:
     s = x.astype(str).str.strip()
     s = s.str.replace("T", " ", regex=False)
 
-    # blanks -> ""
     blank = _is_blank_series(s)
     out = pd.Series([""] * len(s), index=s.index, dtype="object")
     if blank.all():
         return out
 
-    # Detectar hints claros de UTC
     is_utc_hint = s.str.contains(r"(Z$|\+00:00|\+0000|UTC)", case=False, regex=True)
 
-    # 1) Con hint UTC: parse UTC y convertir
     if is_utc_hint.any():
         dt_utc = pd.to_datetime(s[is_utc_hint], errors="coerce", utc=True)
         dt_local = dt_utc.dt.tz_convert(tz_local)
         out.loc[is_utc_hint] = dt_local.dt.strftime("%Y-%m-%d %H:%M:%S").where(dt_local.notna(), "")
 
-    # 2) Sin hint UTC
     if (~is_utc_hint).any():
         dt_naive = pd.to_datetime(s[~is_utc_hint], errors="coerce")
-
         if assume_naive_is_utc:
-            # tratar como UTC y convertir
             dt_utc2 = dt_naive.dt.tz_localize("UTC", nonexistent="NaT", ambiguous="NaT")
             dt_local2 = dt_utc2.dt.tz_convert(tz_local)
             out.loc[~is_utc_hint] = dt_local2.dt.strftime("%Y-%m-%d %H:%M:%S").where(dt_local2.notna(), "")
         else:
-            # tratar como ya local (solo formatear)
             out.loc[~is_utc_hint] = dt_naive.dt.strftime("%Y-%m-%d %H:%M:%S").where(dt_naive.notna(), "")
 
     out = out.where(~blank, "")
@@ -226,9 +274,6 @@ def apply_preferred_order(df: pd.DataFrame, header: list) -> list:
     return final_header
 
 def update_only_columns(ws, df_final: pd.DataFrame, header: list, cols_to_write: list):
-    """
-    Escribe SOLO columnas específicas (no reescribe toda la tabla).
-    """
     n = len(df_final)
     for col_name in cols_to_write:
         if col_name not in header or col_name not in df_final.columns:
@@ -252,6 +297,7 @@ def main():
         print("Funnel vacío.")
         return
 
+    # requisitos mínimos
     for c in [COL_REF, COL_INSERTED_AT, COL_DESCUENTO_FUNNEL]:
         if c not in df_funnel.columns:
             raise RuntimeError(f"Falta columna '{c}' en Funnel")
@@ -260,10 +306,14 @@ def main():
     df_funnel["_inserted_dt"] = _parse_date_series(df_funnel[COL_INSERTED_AT])
 
     has_ce = COL_CE in df_funnel.columns
+    has_ahorro = COL_AHORRO_FUNNEL in df_funnel.columns  # ✅ NUEVO
 
     cols_needed = [COL_REF, COL_DESCUENTO_FUNNEL] + UPDATE_COLS_FUNNEL
     if has_ce:
         cols_needed.append(COL_CE)
+    if has_ahorro:
+        cols_needed.append(COL_AHORRO_FUNNEL)
+
     cols_needed = [c for c in cols_needed if c in df_funnel.columns]
 
     df_latest = (
@@ -275,9 +325,6 @@ def main():
 
     # Renombrar a nombres Bucket
     df_latest.rename(columns=FUNNEL_TO_BUCKET_RENAME, inplace=True)
-
-    # ✅ CLAVE: NO convertir aquí "Fecha Actualizacion".
-    # Dejamos el valor del Funnel como viene (normalmente UTC) para convertir UNA sola vez en el merge.
 
     # Normalizar a string (resto)
     for c in df_latest.columns:
@@ -315,7 +362,10 @@ def main():
     ]
     if has_ce:
         cols_target_bucket.append("CE")
+    if has_ahorro:
+        cols_target_bucket.append(COL_AHORRO_BUCKET)  # ✅ NUEVO
 
+    # asegurar columnas existen
     for c in cols_target_bucket:
         if c not in df_bucket.columns:
             df_bucket[c] = ""
@@ -340,10 +390,7 @@ def main():
 
         # ✅ Caso especial: Fecha Actualizacion
         if col == "Fecha Actualizacion":
-            # old ya está en Colombia -> solo formatear (NO convertir)
             old_cmp = to_bogota_str(old, tz_local=TZ, assume_naive_is_utc=False)
-
-            # new viene del Funnel (UTC, a veces sin Z) -> convertir a Colombia UNA sola vez
             new_cmp = to_bogota_str(new, tz_local=TZ, assume_naive_is_utc=True)
 
             mask_has_new = ~_is_blank_series(new_cmp)
@@ -356,7 +403,26 @@ def main():
             df_merged.drop(columns=[col_new], inplace=True)
             continue
 
-        # --- resto igual ---
+        # ✅ Caso especial: Ahorro total (comparación numérica tolerante)
+        if col == COL_AHORRO_BUCKET:
+            old_num = _to_num_strict(old)
+            new_num = _to_num_strict(new)
+
+            mask_has_new = new_num.notna()
+            # tolerancia pequeña por redondeo/formato
+            mask_diff = mask_has_new & (
+                old_num.isna() | ((old_num - new_num).abs() > 1e-6)
+            )
+
+            if mask_diff.any():
+                # escribimos el string del Funnel (tal cual viene)
+                df_merged.loc[mask_diff, col] = new.astype(str)[mask_diff]
+                updated_cells += int(mask_diff.sum())
+
+            df_merged.drop(columns=[col_new], inplace=True)
+            continue
+
+        # --- resto igual (solo si new no está vacío y es distinto) ---
         mask_has_new = ~_is_blank_series(new)
         mask_diff = mask_has_new & (old.astype(str).ne(new.astype(str)))
 
@@ -374,7 +440,7 @@ def main():
             assume_naive_is_utc=False
         )
 
-    # -------- Regla mensual --------
+    # -------- Regla mensual (NO incluye Ahorro total) --------
     df_merged = clear_monthly_fields_if_not_current_month(df_merged, tz=TZ)
 
     # -------- Escribir SOLO las columnas target --------
@@ -382,7 +448,9 @@ def main():
 
     print(
         f"OK | Celdas actualizadas (aprox): {updated_cells} | "
-        f"Cols tocadas: {len(cols_target_bucket)} | CE en Funnel: {'SI' if has_ce else 'NO'} | "
+        f"Cols tocadas: {len(cols_target_bucket)} | "
+        f"CE en Funnel: {'SI' if has_ce else 'NO'} | "
+        f"Ahorro en Funnel: {'SI' if has_ahorro else 'NO'} | "
         f"ASSUME_BUCKET_DATES_ARE_UTC: {ASSUME_BUCKET_DATES_ARE_UTC}"
     )
 
