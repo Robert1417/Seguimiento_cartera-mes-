@@ -306,9 +306,9 @@ def main():
     tipo_q = df_quota[COL_TIPO_ACT].astype(str).str.upper().str.strip()
     status_q = df_quota[COL_STATUS].astype(str).str.upper().str.strip()
 
-    df_quota["_peso"] = 1
-    df_quota.loc[tipo_q.eq("EFECTIVA"), "_peso"] = 2
-    df_quota.loc[tipo_q.eq("EFECTIVA") & status_q.eq("LIQUIDADO"), "_peso"] = 4
+    df_quota["_peso"] = 1000
+    df_quota.loc[tipo_q.eq("EFECTIVA"), "_peso"] = 2000
+    df_quota.loc[tipo_q.eq("EFECTIVA") & status_q.eq("LIQUIDADO"), "_peso"] = 4000
 
     quotas = df_quota.groupby(COL_NEGOCIADOR)["_peso"].sum().astype(int).to_dict()
 
