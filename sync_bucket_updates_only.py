@@ -7,7 +7,8 @@
 #   1) Descuento Requerido (desde Funnel: Descuento)
 #   2) CE (si existe en Funnel)
 #   3) Ahorro total (solo si es distinto Funnel vs Bucket)
-#   4) Estas columnas “de actualización” (último registro en Funnel por inserted_at_ultima):
+#   4) Por cobrar (solo si es distinto Funnel vs Bucket)   ✅ NUEVO
+#   5) Estas columnas “de actualización” (último registro en Funnel por inserted_at_ultima):
 #      Descuento_Actualizacion, Fecha Actualizacion, Actualizado Por,
 #      Categoria Actualizacion, Pago a Banco actualizacion, Observación, Tipo de Actividad
 # - Mantiene el orden del header (PREFERRED_ORDER)
@@ -39,9 +40,13 @@ COL_CE = "CE"
 COL_DESCUENTO_FUNNEL = "Descuento"
 COL_DESCUENTO_BUCKET = "Descuento Requerido"
 
-# ✅ NUEVO: Ahorro total
+# ✅ Ahorro total
 COL_AHORRO_FUNNEL = "Ahorro total"
 COL_AHORRO_BUCKET = "Ahorro total"
+
+# ✅ NUEVO: Por cobrar (mismo nombre en Funnel y Bucket)
+COL_POR_COBRAR_FUNNEL = "Por cobrar"
+COL_POR_COBRAR_BUCKET = "Por cobrar"
 
 # 🔧 Si tu Bucket históricamente quedó guardado como UTC "oculto" (sin Z),
 # ponlo True para corregir histórico. Cuando ya quede bien, lo pones False.
@@ -56,6 +61,7 @@ FUNNEL_TO_BUCKET_RENAME = {
     "payment_to_bank_ultima": "Pago a Banco actualizacion",
     "observations_ultima": "Observación",
     # Ahorro total se queda igual
+    # Por cobrar se queda igual
 }
 
 PREFERRED_ORDER = [
@@ -143,7 +149,6 @@ def _to_num_strict(v: pd.Series) -> pd.Series:
     has_comma = s2.str.contains(",", regex=False)
     has_dot = s2.str.contains(".", regex=False)
 
-    # ✅ antes: pd.Series([pd.NA]*..., dtype="float64") -> TypeError
     out = pd.Series(np.nan, index=s2.index, dtype="float64")
 
     mask_both = has_comma & has_dot
@@ -190,7 +195,6 @@ def to_bogota_str(x: pd.Series, tz_local: str = TZ, assume_naive_is_utc: bool = 
     if blank.all():
         return out
 
-    # ✅ quitar warning regex: usar non-capturing group (?:...)
     is_utc_hint = s.str.contains(r"(?:Z$|\+00:00|\+0000|UTC)", case=False, regex=True)
 
     if is_utc_hint.any():
@@ -282,7 +286,6 @@ def update_only_columns(ws, df_final: pd.DataFrame, header: list, cols_to_write:
         end_cell = gspread.utils.rowcol_to_a1(n + 1, col_idx_1based)
         rng = f"{start_cell}:{end_cell}"
 
-        # ✅ evitar warning deprecación: values primero o argumentos nombrados
         ws.update(
             range_name=rng,
             values=[[v] for v in df_final[col_name].astype(str).tolist()],
@@ -307,12 +310,16 @@ def main():
 
     has_ce = COL_CE in df_funnel.columns
     has_ahorro = COL_AHORRO_FUNNEL in df_funnel.columns
+    has_por_cobrar = COL_POR_COBRAR_FUNNEL in df_funnel.columns  # ✅ NUEVO
 
     cols_needed = [COL_REF, COL_DESCUENTO_FUNNEL] + UPDATE_COLS_FUNNEL
     if has_ce:
         cols_needed.append(COL_CE)
     if has_ahorro:
         cols_needed.append(COL_AHORRO_FUNNEL)
+    if has_por_cobrar:  # ✅ NUEVO
+        cols_needed.append(COL_POR_COBRAR_FUNNEL)
+
     cols_needed = [c for c in cols_needed if c in df_funnel.columns]
 
     df_latest = (
@@ -362,6 +369,8 @@ def main():
         cols_target_bucket.append("CE")
     if has_ahorro:
         cols_target_bucket.append(COL_AHORRO_BUCKET)
+    if has_por_cobrar:  # ✅ NUEVO
+        cols_target_bucket.append(COL_POR_COBRAR_BUCKET)
 
     # asegurar columnas existen
     for c in cols_target_bucket:
@@ -372,7 +381,7 @@ def main():
 
     # Reordenar header (presentación)
     bucket_header = apply_preferred_order(df_bucket, bucket_header)
-    ws_bucket.update(range_name="A1", values=[bucket_header])  # ✅ sin warning
+    ws_bucket.update(range_name="A1", values=[bucket_header])
 
     # -------- Merge para actualizar SOLO columnas target --------
     df_merged = df_bucket.merge(df_latest, on=COL_REF, how="left", suffixes=("", "__new"))
@@ -416,6 +425,21 @@ def main():
             df_merged.drop(columns=[col_new], inplace=True)
             continue
 
+        # ✅ NUEVO: Caso especial Por cobrar (mismo tratamiento que Ahorro total)
+        if col == COL_POR_COBRAR_BUCKET:
+            old_num = _to_num_strict(old)
+            new_num = _to_num_strict(new)
+
+            mask_has_new = new_num.notna()
+            mask_diff = mask_has_new & (old_num.isna() | ((old_num - new_num).abs() > 1e-6))
+
+            if mask_diff.any():
+                df_merged.loc[mask_diff, col] = new.astype(str)[mask_diff]
+                updated_cells += int(mask_diff.sum())
+
+            df_merged.drop(columns=[col_new], inplace=True)
+            continue
+
         # --- resto igual (solo si new no está vacío y es distinto) ---
         mask_has_new = ~_is_blank_series(new)
         mask_diff = mask_has_new & (old.astype(str).ne(new.astype(str)))
@@ -434,7 +458,7 @@ def main():
             assume_naive_is_utc=False
         )
 
-    # -------- Regla mensual (NO incluye Ahorro total) --------
+    # -------- Regla mensual (NO incluye Ahorro total ni Por cobrar) --------
     df_merged = clear_monthly_fields_if_not_current_month(df_merged, tz=TZ)
 
     # -------- Escribir SOLO las columnas target --------
@@ -445,6 +469,7 @@ def main():
         f"Cols tocadas: {len(cols_target_bucket)} | "
         f"CE en Funnel: {'SI' if has_ce else 'NO'} | "
         f"Ahorro en Funnel: {'SI' if has_ahorro else 'NO'} | "
+        f"Por cobrar en Funnel: {'SI' if has_por_cobrar else 'NO'} | "
         f"ASSUME_BUCKET_DATES_ARE_UTC: {ASSUME_BUCKET_DATES_ARE_UTC}"
     )
 
