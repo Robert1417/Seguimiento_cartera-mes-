@@ -415,8 +415,10 @@ def main():
         existing_refs = set(df_bucket[COL_REF].tolist())
 
         update_cols_present_funnel = [
-            c for c in UPDATE_COLS_FUNNEL
-            if c in df.columns and _norm_key(c) not in {_norm_key(x) for x in EXCLUDE_COLS_BUCKET}
+            c for c in df.columns
+            if c != COL_REF
+            and c != "_inserted_dt"
+            and _norm_key(c) not in {_norm_key(x) for x in EXCLUDE_COLS_BUCKET}
         ]
         update_cols_present_bucket = [
             FUNNEL_TO_BUCKET_RENAME.get(c, c)
