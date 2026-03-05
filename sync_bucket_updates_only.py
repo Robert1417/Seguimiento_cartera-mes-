@@ -96,8 +96,8 @@ PREFERRED_ORDER = [
     "ultimo contacto",
     "Bucket",
     "Nuevo",
-    "FASE",
-    "STATUS",
+    "PB Ideal 48 meses",
+    "PB Ideal 60 meses",
 ]
 
 MONTHLY_CLEAR_COLS = [
