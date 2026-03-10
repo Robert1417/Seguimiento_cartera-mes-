@@ -20,7 +20,7 @@ COL_BUCKET = "Bucket"
 COL_NEGOCIADOR = "Negociador"
 COL_INSERTED_AT = "inserted_at_ultima"
 COL_TIPO_ACT = "Tipo de Actividad"
-COL_PB Ideal 60 meses = "PB Ideal 60 meses"
+COL_PB_Ideal_60_meses = "PB Ideal 60 meses"
 COL_NUEVO = "Nuevo"
 
 # Columna nueva que quieres traer de Funnel
@@ -266,7 +266,7 @@ def main():
         print("Funnel vacío")
         return
 
-    req = [COL_REF, COL_BUCKET, COL_NEGOCIADOR, COL_INSERTED_AT, COL_TIPO_ACT, COL_PB Ideal 60 meses]
+    req = [COL_REF, COL_BUCKET, COL_NEGOCIADOR, COL_INSERTED_AT, COL_TIPO_ACT, COL_PB_Ideal_60_meses]
     for c in req:
         if c not in df.columns:
             raise RuntimeError(f"Falta columna {c} en Funnel")
@@ -296,19 +296,19 @@ def main():
     df_yesterday = df[df["_inserted_dt"].dt.date == yesterday].copy()
     if not df_yesterday.empty:
         tipo_y = df_yesterday[COL_TIPO_ACT].astype(str).str.upper().str.strip()
-        PB Ideal 60 meses_y = df_yesterday[COL_PB Ideal 60 meses].astype(str).str.upper().str.strip()
-        df_yesterday_special = df_yesterday[tipo_y.eq("EFECTIVA") & PB Ideal 60 meses_y.eq("LIQUIDADO")].copy()
+        PB_Ideal_60_meses_y = df_yesterday[COL_PB_Ideal_60_meses].astype(str).str.upper().str.strip()
+        df_yesterday_special = df_yesterday[tipo_y.eq("EFECTIVA") & PB_Ideal_60_meses_y.eq("LIQUIDADO")].copy()
     else:
         df_yesterday_special = df_yesterday
 
     df_quota = pd.concat([df_today, df_yesterday_special], ignore_index=True)
 
     tipo_q = df_quota[COL_TIPO_ACT].astype(str).str.upper().str.strip()
-    PB Ideal 60 meses_q = df_quota[COL_PB Ideal 60 meses].astype(str).str.upper().str.strip()
+    PB_Ideal_60_meses_q = df_quota[COL_PB_Ideal_60_meses].astype(str).str.upper().str.strip()
 
     df_quota["_peso"] = 1
     df_quota.loc[tipo_q.eq("EFECTIVA"), "_peso"] = 2
-    df_quota.loc[tipo_q.eq("EFECTIVA") & PB Ideal 60 meses_q.eq("LIQUIDADO"), "_peso"] = 3
+    df_quota.loc[tipo_q.eq("EFECTIVA") & PB_Ideal_60_meses_q.eq("LIQUIDADO"), "_peso"] = 3
 
     quotas = df_quota.groupby(COL_NEGOCIADOR)["_peso"].sum().astype(int).to_dict()
 
