@@ -315,6 +315,7 @@ def main():
     cols_needed = [COL_REF, COL_DESCUENTO_FUNNEL] + UPDATE_COLS_FUNNEL + [
         "PB Ideal 48 meses",
         "PB Ideal 60 meses",
+        "Negociador",
     ]    
     if has_ce:
         cols_needed.append(COL_CE)
@@ -369,6 +370,7 @@ def main():
         "Descuento_Actualizacion",
         "PB Ideal 48 meses",     # NUEVO
         "PB Ideal 60 meses", 
+        "Negociador",
     ]
     if has_ce:
         cols_target_bucket.append("CE")
