@@ -65,6 +65,9 @@ EXCLUDE_COLS_BUCKET = [
     "tiene_obs",
     "es_este_mes",
     "tiene_liquidado_historico",
+    "FASE",
+    "STATUS",
+    "_end_norm2",
 ]
 
 # =========================================================
@@ -404,83 +407,6 @@ def main():
             header = _filter_header_excluded(header)
 
             ws_b.update("A2", df_to_rows(df_bucket, header), value_input_option="USER_ENTERED")
-
-    # =========================================================
-    # SINCRONIZAR columnas dinámicas para referencias existentes (post-limpieza)
-    # =========================================================
-    updates_in_bucket = 0
-
-    if not df_bucket.empty and COL_REF in df_bucket.columns:
-        df_bucket[COL_REF] = df_bucket[COL_REF].astype(str).str.strip()
-        existing_refs = set(df_bucket[COL_REF].tolist())
-
-        update_cols_present_funnel = [
-            c for c in df.columns
-            if c != COL_REF
-            and c != "_inserted_dt"
-            and _norm_key(c) not in {_norm_key(x) for x in EXCLUDE_COLS_BUCKET}
-        ]
-        update_cols_present_bucket = [
-            FUNNEL_TO_BUCKET_RENAME.get(c, c)
-            for c in update_cols_present_funnel
-            if _norm_key(FUNNEL_TO_BUCKET_RENAME.get(c, c)) not in {_norm_key(x) for x in EXCLUDE_COLS_BUCKET}
-        ]
-
-        if update_cols_present_funnel and existing_refs:
-            df_latest = (
-                df[df[COL_REF].isin(existing_refs)]
-                .sort_values("_inserted_dt")
-                .groupby(COL_REF, as_index=False)
-                .tail(1)[[COL_REF] + update_cols_present_funnel]
-                .copy()
-            )
-
-            df_latest.rename(columns=FUNNEL_TO_BUCKET_RENAME, inplace=True)
-            df_latest = _drop_excluded(df_latest)
-
-            latest_map = (
-                df_latest.set_index(COL_REF)[update_cols_present_bucket]
-                .astype(str)
-                .to_dict(orient="index")
-            )
-
-            for c in update_cols_present_bucket:
-                if c not in df_bucket.columns:
-                    df_bucket[c] = ""
-                    if c not in header:
-                        header.append(c)
-
-            header = _filter_header_excluded(header)
-
-            for ref in existing_refs:
-                if ref not in latest_map:
-                    continue
-                mask = df_bucket[COL_REF].eq(ref)
-                for c, new_val in latest_map[ref].items():
-                    if _norm_key(c) in {_norm_key(x) for x in EXCLUDE_COLS_BUCKET}:
-                        continue
-                    old_vals = df_bucket.loc[mask, c].astype(str)
-                    if (old_vals != str(new_val)).any():
-                        df_bucket.loc[mask, c] = str(new_val)
-                        updates_in_bucket += int(mask.sum())
-
-            # ✅ regla mensual antes de escribir
-            df_bucket = clear_monthly_fields_if_not_current_month(df_bucket, tz=TZ)
-
-            if updates_in_bucket > 0:
-                if COL_NUEVO in df_bucket.columns:
-                    df_bucket[COL_NUEVO] = ""
-
-                df_bucket = _drop_excluded(df_bucket)
-                header = apply_preferred_order(df_bucket, header)
-                header = _filter_header_excluded(header)
-
-                ws_b.update("A1", [header])
-                ws_b.update("A2", df_to_rows(df_bucket, header), value_input_option="USER_ENTERED")
-        else:
-            # Aunque no haya updates, igual aplicamos regla mensual para limpiar data vieja
-            df_bucket = clear_monthly_fields_if_not_current_month(df_bucket, tz=TZ)
-            ws_b.update("A1", [apply_preferred_order(df_bucket, header)])
 
     # ------------------ limpiar "Nuevo" (seguro) ------------------
     if not df_bucket.empty and COL_NUEVO in df_bucket.columns:
