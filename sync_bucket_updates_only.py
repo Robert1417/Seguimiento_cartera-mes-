@@ -312,7 +312,10 @@ def main():
     has_ahorro = COL_AHORRO_FUNNEL in df_funnel.columns
     has_por_cobrar = COL_POR_COBRAR_FUNNEL in df_funnel.columns  # ✅ NUEVO
 
-    cols_needed = [COL_REF, COL_DESCUENTO_FUNNEL] + UPDATE_COLS_FUNNEL
+    cols_needed = [COL_REF, COL_DESCUENTO_FUNNEL] + UPDATE_COLS_FUNNEL + [
+        "PB Ideal 48 meses",
+        "PB Ideal 60 meses",
+    ]    
     if has_ce:
         cols_needed.append(COL_CE)
     if has_ahorro:
@@ -364,6 +367,8 @@ def main():
         "Observación",
         "Tipo de Actividad",
         "Descuento_Actualizacion",
+        "PB Ideal 48 meses",     # NUEVO
+        "PB Ideal 60 meses", 
     ]
     if has_ce:
         cols_target_bucket.append("CE")
