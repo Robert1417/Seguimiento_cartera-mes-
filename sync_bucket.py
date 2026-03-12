@@ -263,6 +263,8 @@ def clear_monthly_fields_if_not_current_month(df_bucket: pd.DataFrame, tz: str =
 def main():
     gc = get_gspread_client()
 
+    updates_in_bucket = 0
+
     # ------------------ Funnel ------------------
     df = read_worksheet_as_df(gc, FUNNEL_SHEET_ID, FUNNEL_TAB_NAME)
     if df.empty:
