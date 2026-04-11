@@ -311,9 +311,9 @@ def main():
     tipo_q = df_quota[COL_TIPO_ACT].astype(str).str.upper().str.strip()
     PB_Ideal_60_meses_q = df_quota[COL_PB_Ideal_60_meses].astype(str).str.upper().str.strip()
 
-    df_quota["_peso"] = 100
-    df_quota.loc[tipo_q.eq("EFECTIVA"), "_peso"] = 200
-    df_quota.loc[tipo_q.eq("EFECTIVA") & PB_Ideal_60_meses_q.eq("LIQUIDADO"), "_peso"] = 300
+    df_quota["_peso"] = 1
+    df_quota.loc[tipo_q.eq("EFECTIVA"), "_peso"] = 2
+    df_quota.loc[tipo_q.eq("EFECTIVA") & PB_Ideal_60_meses_q.eq("LIQUIDADO"), "_peso"] = 3
 
     quotas = df_quota.groupby(COL_NEGOCIADOR)["_peso"].sum().astype(int).to_dict()
 
