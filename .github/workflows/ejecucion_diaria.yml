@@ -3,18 +3,19 @@ name: Ejecucion timeline cartera
 on:
   workflow_dispatch:
   schedule:
-  # LUN–VIE (COL UTC-5):
-  # 9:15, 10:15, 11:00, 12:05, 1:05, 2:00, 3:05, 4:05, 5:00, 5:40
-  # => UTC: 14:15, 15:15, 16:00, 17:05, 18:05, 19:00, 20:05, 21:05, 22:00, 22:40
-   - cron: "15 14,15 * * 1-5"
-   - cron: "0 16,19,22 * * 1-5"
-   - cron: "5 17,18,20,21 * * 1-5"
-   - cron: "40 22 * * 1-5"
+    # LUN–VIE (hora Colombia UTC-5)
+    # 7:20 a. m. a 8:40 p. m. cada 20 min
+    - cron: "20,40 12 * * 1-5"
+    - cron: "0,20,40 13-23 * * 1-5"
+    - cron: "0,20,40 0-1 * * 2-6"
 
-  # SÁBADO (COL 9:00–14:00) cada hora (UTC 14–19)
-   - cron: "0 14-19 * * 6"
+    # SÁBADOS (hora Colombia UTC-5)
+    # 9:30 a. m. a 1:30 p. m. cada 40 min, y 2:00 p. m.
+    - cron: "30 14 * * 6"
+    - cron: "10,50 15-18 * * 6"
+    - cron: "30 19 * * 6"
+    - cron: "0 19 * * 6"
 
-# Evita que dos ejecuciones se pisen (muy común en jobs por cron)
 concurrency:
   group: ejecucion-timeline-cartera
   cancel-in-progress: true
@@ -26,7 +27,6 @@ jobs:
   run:
     runs-on: ubuntu-22.04
     env:
-      # Con uno basta; dejo ambos por compatibilidad con tu código actual
       GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.MI_JSON }}
       MI_JSON: ${{ secrets.MI_JSON }}
 
@@ -49,7 +49,6 @@ jobs:
           set -e
           python -m pip install --upgrade pip
 
-          # Reintento simple por si PyPI/red falla intermitente
           for i in 1 2 3 4 5; do
             echo "Attempt $i installing requirements..."
             pip install -r requirements.txt --retries 5 --timeout 60 && break
@@ -76,7 +75,6 @@ jobs:
 
           git add -A
 
-          # Si no hay cambios, salir limpio
           if git diff --cached --quiet; then
             echo "No changes to commit."
             exit 0
@@ -84,7 +82,6 @@ jobs:
 
           git commit -m "Auto update"
 
-          # Rebase antes de pushear + reintento por conflictos/carreras
           for i in 1 2 3; do
             git pull --rebase origin main || true
             if git push origin HEAD:main; then
