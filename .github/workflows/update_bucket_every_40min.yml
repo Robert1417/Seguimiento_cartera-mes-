@@ -1,35 +1,28 @@
 name: Update Bucket Columns (cada 45m desde 8:45)
 
 on:
+  workflow_dispatch:
   schedule:
-    # LUN–VIE (Bogotá UTC-5)
-    # 07:40, 08:01, 08:22, 08:43, ..., 20:58
-    - cron: "40 12 * * 1-5"       # 07:40 COL
-    - cron: "1,22,43 13 * * 1-5"  # 08:01, 08:22, 08:43 COL
-    - cron: "4,25,46 14 * * 1-5"
-    - cron: "7,28,49 15 * * 1-5"
-    - cron: "10,31,52 16 * * 1-5"
-    - cron: "13,34,55 17 * * 1-5"
-    - cron: "16,37,58 18 * * 1-5"
-    - cron: "19,40 19 * * 1-5"
-    - cron: "1,22,43 20 * * 1-5"
-    - cron: "4,25,46 21 * * 1-5"
-    - cron: "7,28,49 22 * * 1-5"
-    - cron: "10,31,52 23 * * 1-5"
-    - cron: "13,34,55 0 * * 2-6"
-    - cron: "16,37,58 1 * * 2-6"  # hasta 20:58 COL del día anterior
+    # LUN–VIE: 11 min después del timeline
+    # Timeline: 7:20, 7:40, 8:00, 8:20, ... 20:40
+    # Bucket:   7:31, 7:51, 8:11, 8:31, ... 20:51
+    - cron: "31,51 7 * * 1-5"
+      timezone: "America/Bogota"
+    - cron: "11,31,51 8-20 * * 1-5"
+      timezone: "America/Bogota"
 
-    # SÁBADOS (Bogotá UTC-5)
-    # 09:40, 10:25, 11:10, 11:55, 12:40, 13:25, 14:10
-    - cron: "40 14 * * 6"         # 09:40 COL
-    - cron: "25 15 * * 6"         # 10:25 COL
-    - cron: "10 16 * * 6"         # 11:10 COL
-    - cron: "55 16 * * 6"         # 11:55 COL
-    - cron: "40 17 * * 6"         # 12:40 COL
-    - cron: "25 18 * * 6"         # 13:25 COL
-    - cron: "10 19 * * 6"         # 14:10 COL
-  workflow_dispatch: {}
-
+    # SÁBADOS: 11 min después del timeline
+    # Timeline: 9:30, 10:10, 10:50, 11:30, 12:10, 12:50, 13:30, 14:00
+    # Bucket:   9:41, 10:21, 11:01, 11:41, 12:21, 13:01, 13:41, 14:11
+    - cron: "41 9 * * 6"
+      timezone: "America/Bogota"
+    - cron: "21 10 * * 6"
+      timezone: "America/Bogota"
+    - cron: "1,41 11-13 * * 6"
+      timezone: "America/Bogota"
+    - cron: "11 14 * * 6"
+      timezone: "America/Bogota"
+      
 
 concurrency:
   group: update-bucket-columns
