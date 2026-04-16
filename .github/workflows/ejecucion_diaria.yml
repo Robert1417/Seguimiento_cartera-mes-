@@ -14,7 +14,7 @@ on:
       timezone: "America/Bogota"
     - cron: "10,50 10-13 * * 6"
       timezone: "America/Bogota"
-    - cron: "0,30 14 * * 6"
+    - cron: "0 14 * * 6"
       timezone: "America/Bogota"
       
 concurrency:
