@@ -1,9 +1,9 @@
-name: Cartera Dinamica (8am y 3pm COL)
+name: Cartera Dinamica (10am COL)
 
 on:
   schedule:
-    # 3:30 PM Colombia = 20:30 UTC (Lunes a Viernes)
-    - cron: "30 20 * * 1-5"
+    # 10:00 AM Colombia = 15:00 UTC (Lunes a Viernes)
+    - cron: "0 15 * * 1-5"
   workflow_dispatch: {}
 
 jobs:
