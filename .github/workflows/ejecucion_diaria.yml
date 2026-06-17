@@ -64,7 +64,7 @@ jobs:
 
       - name: Run notebook
         run: |
-          jupyter nbconvert --to notebook --execute "Bucket_Renovado.ipynb" \
+          jupyter nbconvert --to notebook --execute "EJECUCIÓN_DIARIA_TIMELINE_CARTERA.ipynb" \
             --output "EJECUCIÓN_DIARIA_TIMELINE_CARTERA_out.ipynb"
 
       - name: Commit & push changes (rebase)
