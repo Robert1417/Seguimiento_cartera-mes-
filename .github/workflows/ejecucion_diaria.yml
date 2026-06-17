@@ -3,13 +3,20 @@ name: Ejecucion timeline cartera
 on:
   workflow_dispatch:
   schedule:
+    # LUN–VIE: 7:20 a. m. a 8:40 p. m. cada 20 min
     - cron: "20,40 7 * * 1-5"
+      timezone: "America/Bogota"
     - cron: "0,20,40 8-20 * * 1-5"
+      timezone: "America/Bogota"
 
+    # SÁBADOS: 9:30 a. m. a 1:30 p. m. cada 40 min, y 2:00 p. m.
     - cron: "30 9 * * 6"
+      timezone: "America/Bogota"
     - cron: "10,50 10-13 * * 6"
+      timezone: "America/Bogota"
     - cron: "0 14 * * 6"
-
+      timezone: "America/Bogota"
+      
 concurrency:
   group: ejecucion-timeline-cartera
   cancel-in-progress: true
@@ -23,7 +30,6 @@ jobs:
     env:
       GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.MI_JSON }}
       MI_JSON: ${{ secrets.MI_JSON }}
-      TZ: America/Bogota
 
     steps:
       - name: Checkout
@@ -38,7 +44,7 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Install deps with retries
+      - name: Install deps (with retries)
         shell: bash
         run: |
           set -e
@@ -58,10 +64,10 @@ jobs:
 
       - name: Run notebook
         run: |
-          jupyter nbconvert --to notebook --execute "Bucket_Renovado.ipynb" \
-            --output "Bucket_Renovado_out.ipynb"
+          jupyter nbconvert --to notebook --execute "EJECUCIÓN_DIARIA_TIMELINE_CARTERA.ipynb" \
+            --output "EJECUCIÓN_DIARIA_TIMELINE_CARTERA_out.ipynb"
 
-      - name: Commit & push changes rebase
+      - name: Commit & push changes (rebase)
         shell: bash
         run: |
           set -e
@@ -75,7 +81,7 @@ jobs:
             exit 0
           fi
 
-          git commit -m "Auto update Bucket Renovado"
+          git commit -m "Auto update"
 
           for i in 1 2 3; do
             git pull --rebase origin main || true
@@ -85,6 +91,9 @@ jobs:
             echo "Push failed, retrying..."
             sleep $((2**i))
           done
+
+          echo "Push failed after retries."
+          exit 1
 
           echo "Push failed after retries."
           exit 1
