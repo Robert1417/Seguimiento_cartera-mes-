@@ -20,7 +20,6 @@ COL_BUCKET = "Bucket"
 COL_NEGOCIADOR = "Negociador"
 COL_INSERTED_AT = "inserted_at_ultima"
 COL_TIPO_ACT = "Tipo de Actividad"
-COL_PB_Ideal_60_meses = "PB Ideal 60 meses"
 COL_NUEVO = "Nuevo"
 
 # Columna nueva que quieres traer de Funnel
@@ -118,8 +117,6 @@ PREFERRED_ORDER = [
     "ultimo contacto",
     "Bucket",
     "Nuevo",
-    "PB Ideal 48 meses",
-    "PB Ideal 60 meses",
 ]
 
 # =========================================================
