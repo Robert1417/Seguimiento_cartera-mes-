@@ -140,11 +140,13 @@ def _sin_acentos(s):
 
 def _parse_date_series(x):
     dt = pd.to_datetime(x, errors="coerce")
+
     if dt.isna().mean() > 0.90:
         dt = pd.to_datetime(
             x.astype(str).str.replace("T", " ", regex=False),
             errors="coerce"
         )
+
     return dt
 
 def _corte_mes_actual_3_a_3(tz=TZ):
@@ -170,15 +172,17 @@ def _filter_header_excluded(header):
     excl = {_norm_key(c) for c in EXCLUDE_COLS_BUCKET}
     return [c for c in header if _norm_key(c) not in excl]
 
-def _valor_0_a_10_no_vacio(s):
+def _valor_0_a_50_no_vacio(s):
     txt = str(s).strip()
+
     if txt == "" or txt.lower() in ["nan", "none", "null"]:
         return False
 
     txt = txt.replace(",", ".")
+
     val = pd.to_numeric(txt, errors="coerce")
 
-    return pd.notna(val) and 0 <= float(val) <= 10
+    return pd.notna(val) and 0 <= float(val) <= 50
 
 def _banco_es_excluido(banco):
     b = _sin_acentos(banco)
@@ -200,6 +204,7 @@ def get_gspread_client():
         raise RuntimeError("Falta MI_JSON.")
 
     info = json.loads(mi_json)
+
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
@@ -280,7 +285,7 @@ def referencias_validas_primera_asignacion(df_base):
 
     tmp = df_base.copy()
 
-    tmp["_potencial_ok"] = tmp[COL_POTENCIAL_CREDITO].apply(_valor_0_a_10_no_vacio)
+    tmp["_potencial_ok"] = tmp[COL_POTENCIAL_CREDITO].apply(_valor_0_a_50_no_vacio)
     tmp["_banco_excluido"] = tmp[COL_BANCO_ORIGEN].apply(_banco_es_excluido)
 
     resumen = (
@@ -467,7 +472,6 @@ def main():
         ws_b.update("A1", [header], value_input_option="USER_ENTERED")
 
         df_bucket = pd.DataFrame(columns=header)
-        current_header = header
 
     else:
         current_header = [_norm_col(c) for c in values[0]]
@@ -482,6 +486,7 @@ def main():
         df_bucket.rename(columns=FUNNEL_TO_BUCKET_RENAME, inplace=True)
         df_bucket = _drop_excluded(df_bucket)
 
+        # Si ya hay encabezado, NO se agregan más columnas.
         header = current_header
 
         for c in header:
@@ -595,7 +600,6 @@ def main():
     refs_especiales_pendientes = set(
         ref_priority[
             (ref_priority[COL_REF].isin(refs_validas_especial_pendientes)) &
-            (ref_priority["bucket_ref"].between(0, 10)) &
             (~ref_priority[COL_REF].isin(existing_refs))
         ][COL_REF].astype(str).str.strip()
     )
@@ -607,7 +611,6 @@ def main():
             sub = ref_priority[
                 (ref_priority["negociador"] == neg) &
                 (ref_priority[COL_REF].isin(refs_especiales_pendientes)) &
-                (ref_priority["bucket_ref"].between(0, 10)) &
                 (~ref_priority[COL_REF].isin(used))
             ].copy()
 
@@ -622,6 +625,7 @@ def main():
 
         print(
             f"Modo Potencial Credito activo | "
+            f"Rango Potencial Credito: 0 a 50 | "
             f"Refs especiales pendientes antes de asignar: {len(refs_especiales_pendientes)} | "
             f"Refs especiales asignadas esta corrida: {len(set(primera_asignacion_refs))} | "
             f"Asignación normal desbloqueada por 90%: "
@@ -630,7 +634,7 @@ def main():
 
     elif not normal_desbloqueado_por_actualizacion:
         print(
-            f"Potencial Credito ya está asignado, pero NO está actualizado al 90% "
+            f"Potencial Credito 0 a 50 ya está asignado, pero NO está actualizado al 90% "
             f"en el corte 3 a 3. No se ejecuta asignación normal. "
             f"Revisa la hoja '{SEGUIMIENTO_TAB_NAME}'."
         )
