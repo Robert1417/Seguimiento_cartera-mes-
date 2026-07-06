@@ -1,6 +1,7 @@
 # sync_bucket.py
 import os
 import json
+import unicodedata
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
@@ -14,20 +15,35 @@ FUNNEL_TAB_NAME = "Funnel"
 BUCKET_SHEET_ID = "1qw77Q0BRAXfavNHzC53TT3usKDXRMp1pezAVG13qz3k"
 BUCKET_TAB_NAME = "Bucket"
 
-# Columnas clave (POR REFERENCIA) EN FUNNEL
 COL_REF = "Referencia"
 COL_BUCKET = "Bucket"
 COL_NEGOCIADOR = "Negociador"
 COL_INSERTED_AT = "inserted_at_ultima"
 COL_TIPO_ACT = "Tipo de Actividad"
 COL_NUEVO = "Nuevo"
-
-# Columna nueva que quieres traer de Funnel
 COL_CE = "CE"
+
+COL_POTENCIAL_CREDITO = "Potencial Credito"
+COL_BANCO_ORIGEN = "BANCOS_ESTANDAR"
 
 TZ = "America/Bogota"
 
-# Columnas a sincronizar (NOMBRES COMO ESTÁN EN FUNNEL)
+PRIMERA_ASIGNACION_POR_NEGOCIADOR = 13
+
+BANCOS_EXCLUIDOS_PRIMERA_ASIGNACION = [
+    "davivienda",
+    "finandina",
+    "sistecredito",
+    "serfinanza",
+    "alkomprar",
+    "caja social",
+    "colsubsidio",
+    "agaval",
+    "comultrasan",
+    "lulo",
+    "nu",
+]
+
 UPDATE_COLS_FUNNEL = [
     "inserted_at_ultima",
     "end_ultima",
@@ -38,16 +54,10 @@ UPDATE_COLS_FUNNEL = [
     "Tipo de Actividad",
 ]
 
-# =========================================================
-# COLUMNAS QUE NO SE DEBEN SUBIR/SINCRONIZAR A BUCKET
-# (se filtran case-insensitive para evitar "Ultimo contacto" vs "ultimo contacto")
-# =========================================================
 EXCLUDE_COLS_BUCKET = [
     "tipo_fila",
     "Negociador liquidacion",
     "Por?",
-
-    # 👇 columnas “basura” que no quieres que aparezcan en Bucket
     "MORAEstructurable",
     "Ahorro medio",
     "Estado Deuda",
@@ -67,9 +77,6 @@ EXCLUDE_COLS_BUCKET = [
     "_end_norm2",
 ]
 
-# =========================================================
-# PRESENTACIÓN EN BUCKET: renombres + orden deseado
-# =========================================================
 FUNNEL_TO_BUCKET_RENAME = {
     "BANCOS_ESTANDAR": "Banco",
     "Descuento": "Descuento Requerido",
@@ -78,10 +85,8 @@ FUNNEL_TO_BUCKET_RENAME = {
     "CATEGORIA_PRED_ultima": "Categoria Actualizacion",
     "payment_to_bank_ultima": "Pago a Banco actualizacion",
     "observations_ultima": "Observación",
-    # CE se mantiene como "CE" (no renombramos)
 }
 
-# ✅ CE va al lado de D_BRAVO
 PREFERRED_ORDER = [
     "Referencia",
     "Id deuda",
@@ -111,16 +116,10 @@ PREFERRED_ORDER = [
     "Tipo de Actividad",
     "Mora_estructurado",
     "MORA_CREDITO",
-    # OJO: si algún día la vuelves a querer, quítala de EXCLUDE_COLS_BUCKET
-    "ultimo contacto",
     "Bucket",
     "Nuevo",
 ]
 
-# =========================================================
-# REGLA NUEVA: limpiar columnas si Fecha Actualizacion NO es del mes actual
-# (NOMBRES FINALES EN BUCKET)
-# =========================================================
 MONTHLY_CLEAR_COLS = [
     "Descuento_Actualizacion",
     "Fecha Actualizacion",
@@ -140,6 +139,11 @@ def _norm_col(s):
 def _norm_key(s):
     return str(s).strip().lower()
 
+def _sin_acentos(s):
+    s = str(s).strip().lower()
+    s = unicodedata.normalize("NFKD", s)
+    return "".join(ch for ch in s if not unicodedata.combining(ch))
+
 def _parse_date_series(x):
     dt = pd.to_datetime(x, errors="coerce")
     if dt.isna().mean() > 0.90:
@@ -149,36 +153,42 @@ def _parse_date_series(x):
         )
     return dt
 
-def _drop_excluded(df: pd.DataFrame) -> pd.DataFrame:
+def _drop_excluded(df):
     excl = {_norm_key(c) for c in EXCLUDE_COLS_BUCKET}
     cols_to_drop = [c for c in df.columns if _norm_key(c) in excl]
-    if cols_to_drop:
-        df = df.drop(columns=cols_to_drop, errors="ignore")
-    return df
+    return df.drop(columns=cols_to_drop, errors="ignore")
 
-def _filter_header_excluded(header: list) -> list:
+def _filter_header_excluded(header):
     excl = {_norm_key(c) for c in EXCLUDE_COLS_BUCKET}
     return [c for c in header if _norm_key(c) not in excl]
+
+def _valor_0_a_10_no_vacio(s):
+    txt = str(s).strip()
+    if txt == "" or txt.lower() in ["nan", "none", "null"]:
+        return False
+
+    txt = txt.replace(",", ".")
+    val = pd.to_numeric(txt, errors="coerce")
+    return pd.notna(val) and 0 <= float(val) <= 10
+
+def _banco_es_excluido(banco):
+    b = _sin_acentos(banco)
+    return any(k in b for k in BANCOS_EXCLUIDOS_PRIMERA_ASIGNACION)
 
 def get_gspread_client():
     mi_json = None
 
-    # 1) Colab
     try:
         from google.colab import userdata
         mi_json = userdata.get("MI_JSON")
     except Exception:
         pass
 
-    # 2) GitHub / Local
     if not mi_json:
         mi_json = os.environ.get("MI_JSON")
 
     if not mi_json:
-        raise RuntimeError(
-            "Falta MI_JSON. En Colab debe existir como secret (userdata), "
-            "y en GitHub como Secret MI_JSON."
-        )
+        raise RuntimeError("Falta MI_JSON.")
 
     info = json.loads(mi_json)
     scopes = [
@@ -213,32 +223,21 @@ def ensure_columns(base_header, must_have):
             header.append(c)
     return header
 
-def apply_preferred_order(df: pd.DataFrame, header: list) -> list:
-    pref = [c for c in PREFERRED_ORDER if c in df.columns]
-    rest = [c for c in header if c in df.columns and c not in pref]
-    final_header = pref + rest
-    for c in df.columns:
-        if c not in final_header:
-            final_header.append(c)
-    return final_header
+def apply_preferred_order(df, header):
+    pref = [c for c in PREFERRED_ORDER if c in header]
+    rest = [c for c in header if c not in pref]
+    return pref + rest
 
 def df_to_rows(df, header):
     return df.reindex(columns=header, fill_value="").astype(str).values.tolist()
 
-def clear_monthly_fields_if_not_current_month(df_bucket: pd.DataFrame, tz: str = TZ) -> pd.DataFrame:
-    """
-    Si 'Fecha Actualizacion' no pertenece al mes en curso, vacía MONTHLY_CLEAR_COLS en esas filas.
-    No borra filas ni columnas: solo setea "".
-    """
-    if df_bucket.empty:
-        return df_bucket
-    if "Fecha Actualizacion" not in df_bucket.columns:
+def clear_monthly_fields_if_not_current_month(df_bucket, tz=TZ):
+    if df_bucket.empty or "Fecha Actualizacion" not in df_bucket.columns:
         return df_bucket
 
-    # asegurar columnas existen
     for c in MONTHLY_CLEAR_COLS:
         if c not in df_bucket.columns:
-            df_bucket[c] = ""
+            continue
 
     now = pd.Timestamp.now(tz=tz)
     cur_y, cur_m = now.year, now.month
@@ -248,19 +247,46 @@ def clear_monthly_fields_if_not_current_month(df_bucket: pd.DataFrame, tz: str =
 
     if mask_old.any():
         for c in MONTHLY_CLEAR_COLS:
-            df_bucket.loc[mask_old, c] = ""
+            if c in df_bucket.columns:
+                df_bucket.loc[mask_old, c] = ""
 
     return df_bucket
+
+def referencias_validas_primera_asignacion(df_base):
+    if COL_POTENCIAL_CREDITO not in df_base.columns:
+        return set()
+
+    if COL_BANCO_ORIGEN not in df_base.columns:
+        return set()
+
+    tmp = df_base.copy()
+
+    tmp["_potencial_ok"] = tmp[COL_POTENCIAL_CREDITO].apply(_valor_0_a_10_no_vacio)
+    tmp["_banco_excluido"] = tmp[COL_BANCO_ORIGEN].apply(_banco_es_excluido)
+
+    resumen = (
+        tmp.groupby(COL_REF)
+        .agg(
+            tiene_potencial_ok=("_potencial_ok", "max"),
+            todos_bancos_excluidos=("_banco_excluido", "min"),
+        )
+        .reset_index()
+    )
+
+    resumen = resumen[
+        (resumen["tiene_potencial_ok"] == True) &
+        (resumen["todos_bancos_excluidos"] == False)
+    ]
+
+    return set(resumen[COL_REF].astype(str).str.strip())
 
 # =========================================================
 # MAIN
 # =========================================================
 def main():
     gc = get_gspread_client()
-
     updates_in_bucket = 0
 
-    # ------------------ Funnel ------------------
     df = read_worksheet_as_df(gc, FUNNEL_SHEET_ID, FUNNEL_TAB_NAME)
     if df.empty:
         print("Funnel vacío")
@@ -278,15 +304,10 @@ def main():
     df[COL_BUCKET] = pd.to_numeric(df[COL_BUCKET], errors="coerce")
     df = df[df[COL_BUCKET].notna()].copy()
     df[COL_BUCKET] = df[COL_BUCKET].astype(int)
-
     df["_inserted_dt"] = _parse_date_series(df[COL_INSERTED_AT])
 
-    # =========================================================
-    # ACTIVIDAD DEL DÍA (para ejecutar flujo) vs CUPOS (regla nueva)
-    # =========================================================
     now = pd.Timestamp.now(tz=TZ)
     today = now.date()
-    yesterday = (now - pd.Timedelta(days=1)).date()
 
     df_today = df[df["_inserted_dt"].dt.date == today].copy()
     if df_today.empty:
@@ -294,23 +315,21 @@ def main():
         return
 
     df_quota = df_today.copy()
-
     tipo_q = df_quota[COL_TIPO_ACT].astype(str).str.upper().str.strip()
 
     df_quota["_peso"] = 2000
     df_quota.loc[tipo_q.eq("EFECTIVA"), "_peso"] = 4000
 
     quotas = df_quota.groupby(COL_NEGOCIADOR)["_peso"].sum().astype(int).to_dict()
-
     bucket_actual_max = int(df_today[COL_BUCKET].max())
 
-    # ------------------ Bucket sheet ------------------
     sh_b, ws_b = get_or_create_worksheet(gc, BUCKET_SHEET_ID, BUCKET_TAB_NAME)
     values = ws_b.get_all_values()
 
     funnel_cols = [
         c for c in df.columns.tolist()
-        if c != "_inserted_dt" and _norm_key(c) not in {_norm_key(x) for x in EXCLUDE_COLS_BUCKET}
+        if c != "_inserted_dt"
+        and _norm_key(c) not in {_norm_key(x) for x in EXCLUDE_COLS_BUCKET}
     ]
 
     funnel_cols_bucket_names = [
@@ -322,7 +341,9 @@ def main():
     desired_header = ensure_columns(funnel_cols_bucket_names, [COL_NUEVO])
     desired_header = _filter_header_excluded(desired_header)
 
-    if not values:
+    bucket_estaba_vacio = not values
+
+    if bucket_estaba_vacio:
         tmp = pd.DataFrame(columns=desired_header)
         header = apply_preferred_order(tmp, desired_header)
         header = _filter_header_excluded(header)
@@ -340,22 +361,14 @@ def main():
         df_bucket.rename(columns=FUNNEL_TO_BUCKET_RENAME, inplace=True)
         df_bucket = _drop_excluded(df_bucket)
 
-        header = ensure_columns(current_header, desired_header)
-        header = _filter_header_excluded(header)
+        # IMPORTANTE:
+        # Si el Bucket ya tiene encabezados, NO agregamos columnas nuevas.
+        header = current_header
 
         for c in header:
             if c not in df_bucket.columns:
                 df_bucket[c] = ""
 
-        header = apply_preferred_order(df_bucket, header)
-        header = _filter_header_excluded(header)
-
-        if header != current_header:
-            ws_b.update("A1", [header])
-
-    # =========================================================
-    # LIMPIEZA POR CAMBIO DE BUCKET (SE MANTIENE)
-    # =========================================================
     removed_refs = set()
 
     if not df_bucket.empty and COL_REF in df_bucket.columns:
@@ -367,6 +380,7 @@ def main():
               .tail(1)[[COL_REF, COL_BUCKET]]
               .copy()
         )
+
         funnel_bucket_map = dict(
             zip(
                 df_funnel_latest_bucket[COL_REF].astype(str).str.strip(),
@@ -376,6 +390,7 @@ def main():
 
         refs_in_bucket = df_bucket[COL_REF].astype(str).str.strip()
         to_remove = []
+
         for ref in refs_in_bucket.unique().tolist():
             b_now = funnel_bucket_map.get(ref, None)
             if b_now is None or pd.isna(b_now):
@@ -391,11 +406,13 @@ def main():
                 df_bucket[COL_NUEVO] = ""
 
             df_bucket = _drop_excluded(df_bucket)
-            header = _filter_header_excluded(header)
 
-            ws_b.update("A2", df_to_rows(df_bucket, header), value_input_option="USER_ENTERED")
+            ws_b.update(
+                "A2",
+                df_to_rows(df_bucket, header),
+                value_input_option="USER_ENTERED"
+            )
 
-    # ------------------ limpiar "Nuevo" (seguro) ------------------
     if not df_bucket.empty and COL_NUEVO in df_bucket.columns:
         if df_bucket[COL_NUEVO].astype(str).str.strip().ne("").any():
             df_bucket[COL_NUEVO] = ""
@@ -406,12 +423,10 @@ def main():
                 [[v] for v in df_bucket[COL_NUEVO].astype(str).tolist()]
             )
 
-    # Referencias ya existentes (no se reasignan nunca)
     existing_refs = set()
     if not df_bucket.empty and COL_REF in df_bucket.columns:
         existing_refs = set(df_bucket[COL_REF].astype(str).str.strip().tolist())
 
-    # ------------------ Referencias candidatas ------------------
     df_cand = df[~df[COL_REF].isin(existing_refs)].copy()
     if df_cand.empty:
         print(
@@ -434,6 +449,37 @@ def main():
     chosen_refs = []
     used = set(existing_refs)
 
+    refs_validas_especial = referencias_validas_primera_asignacion(df_cand)
+
+    # =========================================================
+    # PRIMERA ASIGNACIÓN:
+    # Hasta 13 referencias por negociador,
+    # Potencial Credito no vacío y entre 0 y 10,
+    # excluyendo referencias donde TODOS los bancos sean excluidos.
+    # Solo se priorizan Bucket 0 a 10.
+    # =========================================================
+    primera_asignacion_refs = []
+
+    for neg in sorted(ref_priority["negociador"].dropna().unique().tolist()):
+        sub = ref_priority[
+            (ref_priority["negociador"] == neg) &
+            (ref_priority[COL_REF].isin(refs_validas_especial)) &
+            (ref_priority["bucket_ref"].between(0, 10)) &
+            (~ref_priority[COL_REF].isin(used))
+        ].copy()
+
+        take = sub.head(PRIMERA_ASIGNACION_POR_NEGOCIADOR)
+
+        if not take.empty:
+            refs = take[COL_REF].tolist()
+            primera_asignacion_refs.extend(refs)
+            chosen_refs.extend(refs)
+            used.update(refs)
+
+    # =========================================================
+    # FLUJO NORMAL:
+    # Después de agotar la primera asignación, sigue como antes.
+    # =========================================================
     for neg, quota in quotas.items():
         sub = ref_priority[ref_priority["negociador"] == neg]
         remaining = int(quota)
@@ -441,8 +487,14 @@ def main():
         for b in [0, 1, 2, 3, 4, 5]:
             if remaining <= 0:
                 break
-            sb = sub[(sub["bucket_ref"] == b) & (~sub[COL_REF].isin(used))]
+
+            sb = sub[
+                (sub["bucket_ref"] == b) &
+                (~sub[COL_REF].isin(used))
+            ]
+
             take = sb.head(remaining)
+
             if not take.empty:
                 refs = take[COL_REF].tolist()
                 chosen_refs.extend(refs)
@@ -456,34 +508,28 @@ def main():
         )
         return
 
-    # ------------------ Insertar (todas las filas de esas referencias) ------------------
     df_out = df[df[COL_REF].isin(chosen_refs)].copy()
     df_out[COL_NUEVO] = "Nuevo"
     df_out = df_out.drop(columns=["_inserted_dt"], errors="ignore")
 
     df_out.rename(columns=FUNNEL_TO_BUCKET_RENAME, inplace=True)
     df_out = _drop_excluded(df_out)
-
-    # ✅ regla mensual también para lo que se inserta
     df_out = clear_monthly_fields_if_not_current_month(df_out, tz=TZ)
 
-    header = ensure_columns(header, df_out.columns.tolist())
-    header = _filter_header_excluded(header)
-
-    header = apply_preferred_order(
-        pd.concat([df_bucket, df_out], ignore_index=True) if not df_bucket.empty else df_out,
-        header
+    # IMPORTANTE:
+    # No agregamos columnas nuevas al Bucket.
+    # Solo se escriben las columnas que ya están en el header.
+    ws_b.append_rows(
+        df_to_rows(df_out, header),
+        value_input_option="USER_ENTERED"
     )
-    header = _filter_header_excluded(header)
-
-    ws_b.update("A1", [header])
-    ws_b.append_rows(df_to_rows(df_out, header), value_input_option="USER_ENTERED")
 
     print(
         f"Bucket_actual_max(hoy): {bucket_actual_max} | "
         f"Refs removidas por cambio de bucket: {len(removed_refs)} | "
-        f"Actualizaciones en Bucket (celdas/fila tocadas aprox): {updates_in_bucket} | "
-        f"Referencias asignadas: {len(set(chosen_refs))} | "
+        f"Actualizaciones en Bucket: {updates_in_bucket} | "
+        f"Refs primera asignación especial: {len(set(primera_asignacion_refs))} | "
+        f"Referencias asignadas total: {len(set(chosen_refs))} | "
         f"Filas insertadas: {len(df_out)} | "
         f"CE en Funnel: {'SI' if has_ce else 'NO'}"
     )
