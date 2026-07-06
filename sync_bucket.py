@@ -147,6 +147,20 @@ def _parse_date_series(x):
         )
     return dt
 
+def _corte_mes_actual_3_a_3(tz=TZ):
+    now = pd.Timestamp.now(tz=tz)
+
+    if now.day >= 3:
+        inicio = pd.Timestamp(year=now.year, month=now.month, day=3, tz=tz)
+    else:
+        mes_anterior = now - pd.DateOffset(months=1)
+        inicio = pd.Timestamp(year=mes_anterior.year, month=mes_anterior.month, day=3, tz=tz)
+
+    fin_base = inicio + pd.DateOffset(months=1)
+    fin = pd.Timestamp(year=fin_base.year, month=fin_base.month, day=3, tz=tz)
+
+    return inicio.tz_localize(None), fin.tz_localize(None)
+
 def _drop_excluded(df):
     excl = {_norm_key(c) for c in EXCLUDE_COLS_BUCKET}
     cols_to_drop = [c for c in df.columns if _norm_key(c) in excl]
@@ -158,7 +172,6 @@ def _filter_header_excluded(header):
 
 def _valor_0_a_10_no_vacio(s):
     txt = str(s).strip()
-
     if txt == "" or txt.lower() in ["nan", "none", "null"]:
         return False
 
@@ -184,13 +197,9 @@ def get_gspread_client():
         mi_json = os.environ.get("MI_JSON")
 
     if not mi_json:
-        raise RuntimeError(
-            "Falta MI_JSON. En Colab debe existir como secret userdata, "
-            "y en GitHub como Secret MI_JSON."
-        )
+        raise RuntimeError("Falta MI_JSON.")
 
     info = json.loads(mi_json)
-
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
@@ -248,11 +257,10 @@ def clear_monthly_fields_if_not_current_month(df_bucket, tz=TZ):
     if "Fecha Actualizacion" not in df_bucket.columns:
         return df_bucket
 
-    now = pd.Timestamp.now(tz=tz)
-    cur_y, cur_m = now.year, now.month
+    inicio, fin = _corte_mes_actual_3_a_3(tz)
 
     dt = _parse_date_series(df_bucket["Fecha Actualizacion"])
-    mask_old = dt.notna() & ~((dt.dt.year == cur_y) & (dt.dt.month == cur_m))
+    mask_old = dt.notna() & ~((dt >= inicio) & (dt < fin))
 
     if mask_old.any():
         for c in MONTHLY_CLEAR_COLS:
@@ -317,7 +325,20 @@ def crear_seguimiento_potencial(gc, df_base, refs_validas_especial):
     if COL_OBSERVATIONS not in tmp.columns:
         tmp[COL_OBSERVATIONS] = ""
 
-    tmp["_actualizado"] = tmp[COL_OBSERVATIONS].astype(str).str.strip().ne("")
+    if COL_INSERTED_AT not in tmp.columns:
+        tmp[COL_INSERTED_AT] = ""
+
+    inicio, fin = _corte_mes_actual_3_a_3(TZ)
+
+    tmp["_obs_no_vacia"] = tmp[COL_OBSERVATIONS].astype(str).str.strip().ne("")
+    tmp["_inserted_dt_control"] = _parse_date_series(tmp[COL_INSERTED_AT])
+
+    tmp["_actualizado"] = (
+        tmp["_obs_no_vacia"] &
+        tmp["_inserted_dt_control"].notna() &
+        (tmp["_inserted_dt_control"] >= inicio) &
+        (tmp["_inserted_dt_control"] < fin)
+    )
 
     resumen_ref = (
         tmp.groupby([COL_NEGOCIADOR, COL_REF], as_index=False)
@@ -376,7 +397,6 @@ def main():
 
     updates_in_bucket = 0
 
-    # ------------------ Funnel ------------------
     df = read_worksheet_as_df(gc, FUNNEL_SHEET_ID, FUNNEL_TAB_NAME)
 
     if df.empty:
@@ -420,7 +440,6 @@ def main():
 
     bucket_actual_max = int(df_today[COL_BUCKET].max())
 
-    # ------------------ Bucket sheet ------------------
     sh_b, ws_b = get_or_create_worksheet(gc, BUCKET_SHEET_ID, BUCKET_TAB_NAME)
     values = ws_b.get_all_values()
 
@@ -463,17 +482,12 @@ def main():
         df_bucket.rename(columns=FUNNEL_TO_BUCKET_RENAME, inplace=True)
         df_bucket = _drop_excluded(df_bucket)
 
-        # IMPORTANTE:
-        # Si el Bucket ya tiene encabezado, NO agregamos más columnas.
         header = current_header
 
         for c in header:
             if c not in df_bucket.columns:
                 df_bucket[c] = ""
 
-    # =========================================================
-    # LIMPIEZA POR CAMBIO DE BUCKET
-    # =========================================================
     removed_refs = set()
 
     if not df_bucket.empty and COL_REF in df_bucket.columns:
@@ -522,7 +536,6 @@ def main():
                 value_input_option="USER_ENTERED"
             )
 
-    # ------------------ Limpiar Nuevo ------------------
     if not df_bucket.empty and COL_NUEVO in df_bucket.columns:
         if df_bucket[COL_NUEVO].astype(str).str.strip().ne("").any():
             df_bucket[COL_NUEVO] = ""
@@ -536,13 +549,11 @@ def main():
                 value_input_option="USER_ENTERED"
             )
 
-    # ------------------ Referencias existentes ------------------
     existing_refs = set()
 
     if not df_bucket.empty and COL_REF in df_bucket.columns:
         existing_refs = set(df_bucket[COL_REF].astype(str).str.strip().tolist())
 
-    # ------------------ Candidatas ------------------
     df_cand = df[~df[COL_REF].isin(existing_refs)].copy()
 
     if df_cand.empty:
@@ -567,9 +578,6 @@ def main():
     chosen_refs = []
     used = set(existing_refs)
 
-    # =========================================================
-    # POTENCIAL CREDITO ESPECIAL
-    # =========================================================
     refs_validas_especial_todas = referencias_validas_primera_asignacion(df)
 
     resumen_seguimiento = crear_seguimiento_potencial(
@@ -594,11 +602,6 @@ def main():
 
     primera_asignacion_refs = []
 
-    # =========================================================
-    # PRIMERA ASIGNACIÓN:
-    # Mientras existan referencias especiales pendientes,
-    # asigna hasta 13 por negociador y NO pasa a flujo normal.
-    # =========================================================
     if refs_especiales_pendientes:
         for neg in sorted(ref_priority["negociador"].dropna().unique().tolist()):
             sub = ref_priority[
@@ -625,22 +628,13 @@ def main():
             f"{'SI' if normal_desbloqueado_por_actualizacion else 'NO'}"
         )
 
-    # =========================================================
-    # SI YA NO HAY PENDIENTES ESPECIALES,
-    # PERO TODAVÍA NO LLEGAN AL 90%, NO SE ASIGNA NORMAL.
-    # =========================================================
     elif not normal_desbloqueado_por_actualizacion:
         print(
-            f"Potencial Credito ya está asignado, pero NO está actualizado al 90%. "
-            f"No se ejecuta asignación normal. "
+            f"Potencial Credito ya está asignado, pero NO está actualizado al 90% "
+            f"en el corte 3 a 3. No se ejecuta asignación normal. "
             f"Revisa la hoja '{SEGUIMIENTO_TAB_NAME}'."
         )
 
-    # =========================================================
-    # FLUJO NORMAL:
-    # Solo si ya no hay pendientes especiales
-    # y todos los negociadores tienen mínimo 90% actualizado.
-    # =========================================================
     else:
         for neg, quota in quotas.items():
             sub = ref_priority[ref_priority["negociador"] == neg]
@@ -674,7 +668,6 @@ def main():
         )
         return
 
-    # ------------------ Insertar todas las filas de esas referencias ------------------
     df_out = df[df[COL_REF].isin(chosen_refs)].copy()
 
     df_out[COL_NUEVO] = "Nuevo"
@@ -687,9 +680,6 @@ def main():
 
     df_out = clear_monthly_fields_if_not_current_month(df_out, tz=TZ)
 
-    # IMPORTANTE:
-    # No agrega columnas nuevas.
-    # Solo escribe lo que ya esté en el encabezado actual del Bucket.
     ws_b.append_rows(
         df_to_rows(df_out, header),
         value_input_option="USER_ENTERED"
@@ -702,7 +692,7 @@ def main():
         f"Refs primera asignación especial: {len(set(primera_asignacion_refs))} | "
         f"Referencias asignadas total: {len(set(chosen_refs))} | "
         f"Filas insertadas: {len(df_out)} | "
-        f"Asignación normal desbloqueada por 90%: "
+        f"Asignación normal desbloqueada por 90% corte 3 a 3: "
         f"{'SI' if normal_desbloqueado_por_actualizacion else 'NO'} | "
         f"CE en Funnel: {'SI' if has_ce else 'NO'}"
     )
