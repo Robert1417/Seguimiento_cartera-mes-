@@ -394,6 +394,42 @@ def puede_pasar_a_asignacion_normal(resumen_seguimiento):
 
     return resumen_seguimiento["proporcion_actualizada"].ge(UMBRAL_ACTUALIZACION_POTENCIAL).all()
 
+
+def seleccionar_refs_minimas_por_negociador(ref_priority, negociadores_objetivo, used, refs_preferidas=None):
+    """
+    Garantiza mínimo 1 referencia nueva por negociador objetivo, si existe cartera disponible.
+    Primero intenta con refs_preferidas, y si no encuentra, toma la mejor referencia normal disponible.
+    """
+    chosen = []
+
+    refs_preferidas = set(refs_preferidas or [])
+
+    for neg in sorted(set([str(n).strip() for n in negociadores_objetivo if str(n).strip()])):
+        sub_base = ref_priority[
+            (ref_priority["negociador"].astype(str).str.strip() == neg) &
+            (~ref_priority[COL_REF].isin(used))
+        ].copy()
+
+        if sub_base.empty:
+            print(f"⚠️ Sin referencias nuevas disponibles para {neg}. No se pudo garantizar nueva deuda.")
+            continue
+
+        if refs_preferidas:
+            sub_pref = sub_base[sub_base[COL_REF].isin(refs_preferidas)].copy()
+        else:
+            sub_pref = pd.DataFrame()
+
+        if not sub_pref.empty:
+            take_ref = sub_pref.sort_values(["bucket_ref", "inserted_min"]).iloc[0][COL_REF]
+        else:
+            take_ref = sub_base.sort_values(["bucket_ref", "inserted_min"]).iloc[0][COL_REF]
+
+        take_ref = str(take_ref).strip()
+        chosen.append(take_ref)
+        used.add(take_ref)
+
+    return chosen
+
 # =========================================================
 # MAIN
 # =========================================================
@@ -583,6 +619,14 @@ def main():
     chosen_refs = []
     used = set(existing_refs)
 
+    # Negociadores que tuvieron actividad hoy y, por regla de negocio,
+    # deben recibir mínimo una deuda nueva en cada asignación.
+    negociadores_con_actividad_hoy = [
+        str(n).strip()
+        for n in quotas.keys()
+        if str(n).strip()
+    ]
+
     refs_validas_especial_todas = referencias_validas_primera_asignacion(df)
 
     resumen_seguimiento = crear_seguimiento_potencial(
@@ -605,6 +649,31 @@ def main():
     )
 
     primera_asignacion_refs = []
+    refs_garantia_minima = []
+
+    # =====================================================
+    # REGLA OBLIGATORIA:
+    # Ningún negociador con actividad hoy puede quedar igual.
+    # Antes de cualquier reparto por cuota, se garantiza mínimo
+    # 1 referencia nueva por negociador, si hay cartera disponible.
+    # Prioriza Potencial Crédito cuando aplique; si no hay especial
+    # para ese negociador, toma la mejor deuda normal disponible.
+    # =====================================================
+    refs_garantia_minima = seleccionar_refs_minimas_por_negociador(
+        ref_priority=ref_priority,
+        negociadores_objetivo=negociadores_con_actividad_hoy,
+        used=used,
+        refs_preferidas=refs_especiales_pendientes
+    )
+
+    chosen_refs.extend(refs_garantia_minima)
+
+    # Las referencias de garantía que también eran especiales cuentan
+    # como primera asignación especial.
+    primera_asignacion_refs.extend([
+        r for r in refs_garantia_minima
+        if r in refs_especiales_pendientes
+    ])
 
     if refs_especiales_pendientes:
         for neg in sorted(ref_priority["negociador"].dropna().unique().tolist()):
@@ -614,10 +683,17 @@ def main():
                 (~ref_priority[COL_REF].isin(used))
             ].copy()
 
-            take = sub.head(PRIMERA_ASIGNACION_POR_NEGOCIADOR)
+            # Si ya recibió 1 especial por garantía mínima, solo completa hasta 13.
+            ya_asignadas_especiales_neg = ref_priority[
+                (ref_priority["negociador"] == neg) &
+                (ref_priority[COL_REF].isin(primera_asignacion_refs))
+            ][COL_REF].nunique()
+
+            cupo_especial = max(PRIMERA_ASIGNACION_POR_NEGOCIADOR - ya_asignadas_especiales_neg, 0)
+            take = sub.head(cupo_especial)
 
             if not take.empty:
-                refs = take[COL_REF].tolist()
+                refs = take[COL_REF].astype(str).str.strip().tolist()
 
                 primera_asignacion_refs.extend(refs)
                 chosen_refs.extend(refs)
@@ -628,6 +704,7 @@ def main():
             f"Rango Potencial Credito: 0 a 50 | "
             f"Refs especiales pendientes antes de asignar: {len(refs_especiales_pendientes)} | "
             f"Refs especiales asignadas esta corrida: {len(set(primera_asignacion_refs))} | "
+            f"Refs garantía mínima por negociador: {len(set(refs_garantia_minima))} | "
             f"Asignación normal desbloqueada por 90%: "
             f"{'SI' if normal_desbloqueado_por_actualizacion else 'NO'}"
         )
@@ -635,14 +712,22 @@ def main():
     elif not normal_desbloqueado_por_actualizacion:
         print(
             f"Potencial Credito 0 a 50 ya está asignado, pero NO está actualizado al 90% "
-            f"en el corte 3 a 3. No se ejecuta asignación normal. "
+            f"en el corte 3 a 3. No se ejecuta asignación normal masiva. "
+            f"Solo se aplicó la garantía mínima obligatoria por negociador. "
             f"Revisa la hoja '{SEGUIMIENTO_TAB_NAME}'."
         )
 
     else:
         for neg, quota in quotas.items():
             sub = ref_priority[ref_priority["negociador"] == neg]
-            remaining = int(quota)
+
+            # Si ya recibió 1 por garantía mínima, esa referencia cuenta dentro de su cuota.
+            asignadas_neg = ref_priority[
+                (ref_priority["negociador"] == neg) &
+                (ref_priority[COL_REF].isin(chosen_refs))
+            ][COL_REF].nunique()
+
+            remaining = max(int(quota) - int(asignadas_neg), 0)
 
             for b in [0, 1, 2, 3, 4, 5]:
                 if remaining <= 0:
@@ -656,7 +741,7 @@ def main():
                 take = sb.head(remaining)
 
                 if not take.empty:
-                    refs = take[COL_REF].tolist()
+                    refs = take[COL_REF].astype(str).str.strip().tolist()
 
                     chosen_refs.extend(refs)
                     used.update(refs)
