@@ -31,8 +31,8 @@ COL_OBSERVATIONS = "observations_ultima"
 
 TZ = "America/Bogota"
 
-PRIMERA_ASIGNACION_POR_NEGOCIADOR = 13
-UMBRAL_ACTUALIZACION_POTENCIAL = 0.20
+PRIMERA_ASIGNACION_POR_NEGOCIADOR = 40
+UMBRAL_ACTUALIZACION_POTENCIAL = 0.001
 
 BANCOS_EXCLUIDOS_PRIMERA_ASIGNACION = [
     "davivienda",
@@ -141,7 +141,7 @@ def _sin_acentos(s):
 def _parse_date_series(x):
     dt = pd.to_datetime(x, errors="coerce")
 
-    if dt.isna().mean() > 0.90:
+    if dt.isna().mean() > 0.10:
         dt = pd.to_datetime(
             x.astype(str).str.replace("T", " ", regex=False),
             errors="coerce"
