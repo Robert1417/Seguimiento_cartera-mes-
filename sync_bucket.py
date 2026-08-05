@@ -176,7 +176,7 @@ def main():
         print("No hay actividad reciente de hoy, ayer o antier")
         return
 
-    df_recent["_peso"] = 10
+    df_recent["_peso"] = 5
 
     quotas = (
         df_recent
