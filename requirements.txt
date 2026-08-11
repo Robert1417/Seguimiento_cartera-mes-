@@ -23,3 +23,4 @@ gspread==6.2.1
 gspread-dataframe>=4.0.0 
 gspread-formatting>=1.2.0 
 matplotlib==3.10.0
+python-calamine
