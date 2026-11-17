@@ -1,0 +1,58 @@
+name: Inicio de Ejecución de Workflows
+on:
+  workflow_call:
+    outputs:
+      run_monthly:
+        value: ${{ jobs.check.outputs.run_monthly }}
+      run_daily:
+        value: ${{ jobs.check.outputs.run_daily }}
+      is_business_day:
+        value: ${{ jobs.check.outputs.is_business_day }}
+      
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      run_monthly: ${{ steps.scheduler.outputs.run_monthly }}
+      run_daily: ${{ steps.scheduler.outputs.run_daily }}
+      is_business_day: ${{ steps.scheduler.outputs.is_business_day }}
+      run_tuesd_thursd: ${{ steps.scheduler.outputs.run_tuesd_thursd }}
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Calculate Execution Logic
+        id: scheduler
+        run: |
+          pip install holidays pytz
+          python - <<EOF
+          import datetime, holidays, pytz, os
+          co_tz = pytz.timezone('America/Bogota')
+          now = datetime.datetime.now(co_tz)
+          today = now.date()
+          co_holidays = holidays.Colombia()
+          is_business_day = today.weekday() < 5 and today not in co_holidays
+          
+          # Logic for specific windows
+          is_first_trigger = True
+          
+          run_monthly = "false"
+          if is_business_day and is_first_trigger and 5 <= today.day <= 12:
+              target_monthly = today.replace(day=5)
+              while target_monthly.weekday() >= 5 or target_monthly in co_holidays:
+                  target_monthly += datetime.timedelta(days=1)
+              if today == target_monthly:
+                  run_monthly = "true"
+
+          run_daily = "true" if (is_business_day and is_first_trigger) else "false"
+          is_biz = "true" if is_business_day else "false"
+          run_tuesd_thursd = "true" if (today.weekday() == 1) or (today.weekday() == 3) else "false"
+
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f"run_monthly={run_monthly}\n")
+              f.write(f"run_daily={run_daily}\n")
+              f.write(f"is_business_day={is_biz}\n")
+              f.write(f"run_tuesd_thursd={run_tuesd_thursd}\n")
+          EOF
